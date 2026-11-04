@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Discord フォーラム概要自動投稿ツール</title>
+  <script>(function(){var t='dark';try{if(localStorage.getItem('discord_forum_tool_theme')==='light')t='light';}catch(e){}document.documentElement.setAttribute('data-theme',t);})();</script>
+<link rel="stylesheet" href="discord_forum_app_test59.css">
+</head>
+<body>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sb-brand"><span>Discord<br>フォーラム概要投稿ツール</span></div>
+      <nav class="nav-tabs" role="tablist" aria-label="メニュー">
+        <button role="tab" aria-selected="true" class="tab-btn active" data-tab="databaseTab" data-on-click="switchTab-databaseTab-event">🏠 ホーム<small>シナリオ一覧</small></button>
+        <button role="tab" aria-selected="false" class="tab-btn" data-tab="postTab" data-on-click="switchTab-postTab-event">📝 Discord投稿・編集<small>選択中のシナリオ</small></button>
+        <button role="tab" aria-selected="false" class="tab-btn" data-tab="ccfoliaTab" data-on-click="switchTab-ccfoliaTab-event">♟️ ココフォリア準備<small>PDFから文字・駒を作る</small></button>
+      </nav>
+      <div class="sb-filter">
+        <label class="sb-label" for="sbSearch">🔎 シナリオを検索</label>
+        <input type="search" id="sbSearch" placeholder="タイトル・システム・タグ…" autocomplete="off">
+        <div class="sb-label">🏷️ 絞り込みタグ</div>
+        <div id="sbTags" class="sb-tags"></div>
+      </div>
+      <div class="sb-theme"><div class="sb-label">🎨 テーマ</div><div class="theme-switch" role="group" aria-label="テーマの切り替え"><button type="button" data-theme-set="dark" aria-pressed="true">🌙 ダーク</button><button type="button" data-theme-set="light" aria-pressed="false">☀️ ライト</button></div></div>
+    </aside>
+    <main class="main-area" id="mainArea">
+      <div class="app-header">
+    <div class="app-title" id="pageName">🏠 ホーム</div>
+    <div class="app-actions" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span id="login-status" style="font-size: 0.85rem; color: var(--dc-text-muted);">未ログイン</span>
+      <span id="sync-status" style="font-size: 0.8rem; color: var(--dc-text-muted);"></span>
+      <button id="login-btn" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.85rem; background-color: var(--dc-accent); color: white;">ログイン / 登録</button>
+      <button id="logout-btn" class="btn btn-secondary btn-danger" style="display: none; padding: 6px 12px; font-size: 0.85rem;">ログアウト</button>
+      <button type="button" id="openSettingsBtn" class="btn btn-secondary post-only" data-on-click="open-settings" title="Bot・記号・投稿先チャンネル・バックアップの設定">⚙️ 初期設定</button>
+      <button type="button" class="btn btn-secondary post-only" data-on-click="resetForm">🧹 フォーム初期化</button>
+      <button type="button" class="btn btn-secondary post-only" data-on-click="resetInputs" title="本文・画像・タグ・選択中のシナリオだけをクリアします（ブロックの並びやチャンネル選択はそのまま）">🧹 入力内容のみクリア</button>
+    </div>
+  </div>
+
+
+  <!-- ログインモーダル -->
+  <div id="auth-overlay" class="auth-overlay">
+    <div class="auth-modal">
+      <div class="auth-modal-head">
+        <h2>ログイン・登録</h2>
+        <button type="button" id="auth-close" class="auth-close" aria-label="閉じる">×</button>
+      </div>
+      <p class="auth-lead">ログインしなくてもそのまま使えます。ログインすると、別の端末でもデータを引き継げます。</p>
+
+      <div class="auth-box">
+        <h3>① Googleアカウントでログイン</h3>
+        <button type="button" id="btn-google-login" class="btn btn-google">Googleでログイン</button>
+      </div>
+
+      <div class="auth-box">
+        <h3>② メールアドレスで登録・ログイン</h3>
+        <input type="email" id="email-input" placeholder="メールアドレス" autocomplete="email">
+        <input type="password" id="password-input" placeholder="パスワード（6文字以上）" autocomplete="current-password">
+        <div class="auth-row">
+          <button type="button" id="btn-email-signup" class="btn">新規登録</button>
+          <button type="button" id="btn-email-login" class="btn" style="background:#4e5058;">ログイン</button>
+        </div>
+      </div>
+
+
+      <button type="button" id="btn-pw-reset" class="btn btn-secondary" style="margin:0 0 10px;">パスワードを忘れた場合（再設定メールを送る）</button>
+      <div id="auth-error" class="auth-error"></div>
+    </div>
+  </div>
+
+
+
+<!-- 1. 投稿作成画面 -->
+<div id="postTab" class="tab-content">
+  <div class="workspace">
+    <div class="form-area">
+      
+      <div class="card" style="border-left: 4px solid var(--dc-accent);">
+        <div class="card-title">📖 保存シナリオからデータを呼び出す</div>
+        <div class="qs-wrap">
+          <input type="text" id="scenarioQuickSearch" placeholder="🔍 検索して呼び出し（シナリオ名・システム・技能・タグなど。スペース区切りでAND検索）" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="scenarioQuickResults">
+          <div id="scenarioQuickResults" class="qs-results" role="listbox"></div>
+        </div>
+        <div class="grid-2">
+          <select id="dbScenarioSelect" data-on-change="loadScenarioFromDB-this-value">
+            <option value="">-- 保存済みシナリオを選択して自動入力 --</option>
+          </select>
+          <button type="button" class="btn btn-secondary btn-success" data-on-click="saveCurrentToDB">💾 入力中の内容をDBに保存/更新</button>
+        </div>
+      </div>
+
+      <div id="hoTabs" class="ho-tabs" role="tablist"></div>
+      <div id="hoPanel" style="display:none"></div>
+      <form id="postForm" data-on-submit="handlePost-event">
+        <div class="card">
+          <div class="card-title">📌 送信先チャンネル(複数選択可)</div>
+          
+          <div class="form-group">
+            <label>送信先フォーラムチャンネル<span class="req">*</span></label>
+            <div id="channelCheckboxContainer" class="tag-chips"></div>
+          </div>
+
+          <div class="form-group">
+            <label>付与タグ (クリックで選択)</label>
+            <div id="tagContainer" class="tag-chips"></div>
+          </div>
+
+          <div class="form-group" style="margin-top:14px; margin-bottom:0; border-top:1px dashed var(--dc-border); padding-top:12px;">
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.85rem; text-transform:none; color:var(--dc-text-normal);">
+                <input type="checkbox" id="verticalImageMode" data-on-change="renderPreview" style="width:auto; cursor:pointer;" checked> 
+                📷 画像を縦並び（スタック表示）でアタッチする (推奨)
+              </label>
+              <label style="display:flex; align-items:center; gap:8px; cursor:pointer; font-size:0.85rem; text-transform:none; color:var(--dc-red-fg);">
+                <input type="checkbox" id="noImageMode" data-on-change="renderPreview" style="width:auto; cursor:pointer;"> 
+                🚫 画像を一切添付しない（テキストのみで投稿する）
+              </label>
+            </div>
+          </div>
+
+          <div id="duplicateWarning" style="display:none; color:var(--dc-yellow-fg); font-size:0.85rem; font-weight:bold; margin-top:6px;">
+            ⚠️ 選択中のチャンネルの一部に投稿済みです
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="edit-toolbar"><div id="editScenarioName" class="edit-sname">（新規・未保存）</div><button type="button" class="btn btn-secondary" data-on-click="open-history-modal">📜 投稿履歴を見る</button></div>
+        <div class="form-group" style="margin:0;">
+            <label>フォーラムスレッドタイトル<span class="req">*</span></label>
+            <input type="text" id="title" placeholder="例: サンプルシナリオA" required data-on-input="checkDuplicateStatus-renderPreview">
+          </div>
+          
+          <div class="form-group" style="margin-top:14px;">
+            <label>ショップURL (任意)</label>
+            <input type="url" id="topShopUrl" placeholder="https://..." data-on-input="renderPreview">
+          </div>
+          
+          <div class="form-group" style="margin-top:14px;">
+            <label style="display:flex; justify-content:space-between; align-items:center;">
+              <span>あらすじ・キャッチコピー (見出し無し・ショップURLの後に表示)</span>
+              <span style="display:inline-flex; align-items:center; gap:4px; font-weight:normal; text-transform:none;">
+                装飾スタイル:
+                <select id="topTrailerDecor" style="padding:4px; font-size:0.75rem; background:var(--dc-bg-primary); border:1px solid var(--dc-border); color:var(--dc-text-normal); border-radius:4px; outline:none;" data-on-change="renderPreview-2">
+                  <option value="default">通常(引用)</option>
+                  <option value="simple">シンプル</option>
+                  <option value="fancy">ファンシー</option>
+                  <option value="codeblock">コードブロック</option>
+                  <option value="none">装飾なし</option>
+                </select>
+              </span>
+            </label>
+            <textarea id="topTrailer" data-on-input="renderPreview" placeholder="弱虫は、幸福をさえおそれるものです..."></textarea>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            ↕️ 項目ブロック
+            <div>
+              <button type="button" class="btn btn-secondary" data-on-click="toggleAllBlocks-false">📂 全て開く</button>
+              <button type="button" class="btn btn-secondary" data-on-click="toggleAllBlocks-true">📁 全て閉じる</button>
+              <button type="button" class="btn btn-secondary btn-warning" data-on-click="addSplitBlock">✂️ 投稿分割</button>
+              <button type="button" class="btn btn-secondary btn-warning" data-on-click="autoSplitBlocks">✂️ 自動分割</button>
+              <button type="button" class="btn btn-secondary" data-on-click="addImageBlock">🖼️ 画像追加</button>
+              <button type="button" class="btn btn-secondary" data-on-click="addCustomBlock">＋ 自由項目</button>
+            </div>
+          </div>
+          <div style="font-size: 0.8rem; color: var(--dc-text-muted); margin-bottom: 12px; background: rgba(0,0,0,0.1); padding: 8px 12px; border-radius: 4px; text-align: center; border: 1px dashed var(--dc-border);">
+            💡 項目ごとに装飾スタイル(シンプル・コードブロック等)を選択できます。<br>
+            💡 このエリア内に画像ファイルをドラッグ＆ドロップすると画像ブロックが追加されます。
+          </div>
+          <div id="sortableBlockContainer" 
+               data-on-dragover="handleContainerDragOver-event" 
+               data-on-dragleave="handleContainerDragLeave-event" 
+               data-on-drop="handleContainerDrop-event"
+               style="min-height: 50px; transition: 0.2s;">
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">💬 自動追記返信 (スレッド作成直後の初速返信)</div>
+          <div class="form-group">
+            <textarea id="autoReplyText" placeholder="例: 日程調整用URL: https://example.com/！" data-on-input="renderPreview"></textarea>
+          </div>
+        </div>
+
+        <button type="submit" class="btn" id="submitBtn">🚀 Discordフォーラムに投稿する</button>
+        <div id="statusMsg" class="status-msg"></div>
+      </form>
+    </div>
+
+    <div class="preview-area">
+      <div class="preview-tools"><button type="button" id="previewZoomBtn" data-on-click="preview-zoom" title="プレビューを大きく表示（Escで閉じる）">🔍 拡大表示</button></div>
+      <div class="discord-preview-box" id="hoPreviewBox" style="display:none"></div>
+      <div class="discord-preview-box" id="pubPreviewBox">
+        <div class="discord-header" style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;"><span>👀 リアルタイム Discord プレビュー</span><button type="button" id="copyPostBtn" class="btn btn-secondary btn-xs" data-on-click="copyPostContent">📋 投稿内容をコピー</button></div>
+        
+        <div class="discord-thread-title" id="pvThreadTitle">【スレッドタイトル】</div>
+        <div class="discord-tags" id="pvTags"></div>
+
+        <div class="discord-msg">
+          <img id="pvAvatar" class="discord-avatar" src="https://cdn.discordapp.com/embed/avatars/0.png">
+          <div style="flex:1;">
+            <div>
+              <span class="discord-username" id="pvUsername">概要投稿Bot</span>
+              <span class="discord-bot-tag">BOT</span>
+              <span class="discord-timestamp">今日 12:00</span>
+            </div>
+            <div class="discord-text" id="pvContent"></div>
+          </div>
+        </div>
+
+        <div id="pvReplySection" class="discord-reply-preview" style="display:none; margin-top:16px;">
+          <div class="discord-header">💬 自動追記返信プレビュー</div>
+          <div class="discord-msg">
+            <img id="pvAvatarReply" class="discord-avatar" src="https://cdn.discordapp.com/embed/avatars/0.png">
+            <div>
+              <span class="discord-username" id="pvUsernameReply">概要投稿Bot</span>
+              <span class="discord-bot-tag">BOT</span>
+              <div class="discord-text" id="pvReplyContent"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="charCounter" class="char-counter">文字数推定: 0 / 2000文字</div>
+      </div>
+    </div>
+  </div>
+<div class="edit-bottom">
+      <div id="scenarioGallery" class="card"></div>
+    </div>
+</div>
+
+<!-- 2. シナリオデータベース ＆ ダッシュボード画面 -->
+<div id="databaseTab" class="tab-content active">
+  <div class="card">
+    <div class="card-title">
+      📊 ダッシュボード集計 & フィルター・ソート
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <input type="text" id="dbSearchInput" placeholder="名前・システム・技能・備考・タグ等（スペースでAND）" title="全角/半角・ひらがな/カタカナの違いは無視して検索します" style="width:260px; padding:6px 10px;" data-on-input="debouncedDB">
+        <select id="dbFilterStatus" style="width:130px; padding:6px;" data-on-change="renderDBView">
+          <option value="all">すべての状態</option>
+          <option value="unposted">未投稿のみ</option>
+          <option value="posted">投稿済みのみ</option>
+          <option value="fav">★お気に入りのみ</option>
+        </select>
+        <select id="dbFilterChannel" style="width:170px; padding:6px;" data-on-change="renderDBView" title="チャンネル別に絞り込み"></select>
+        <span id="dbResultCount" class="search-count"></span>
+        <select id="dbSortOrder" style="width:140px; padding:6px;" data-on-change="renderDBView">
+          <option value="newest">登録順 (新しい順)</option>
+          <option value="unposted_first">未投稿を優先</option>
+          <option value="title">タイトル順 (あいうえお)</option>
+        </select>
+        <label class="search-count" style="display:flex; align-items:center; gap:4px; cursor:pointer;" title="★を付けたシナリオを、どの並び順でも先頭に表示します"><input type="checkbox" id="dbFavFirst" style="width:auto;" checked data-on-change="try-localStorage-setItem-discord_forum_t">★を先頭に</label>
+        <button class="btn btn-secondary" data-on-click="setDBViewMode-card" id="btnViewCard">📇 カード</button>
+        <button class="btn btn-secondary" data-on-click="setDBViewMode-table" id="btnViewTable">📋 テーブル</button>
+      </div>
+    </div>
+    <div class="grid-3" style="text-align:center;">
+      <div style="background:var(--dc-bg-primary); padding:12px; border-radius:6px;">
+        <div style="font-size:0.8rem; color:var(--dc-text-muted);">総シナリオ数</div>
+        <div id="totalScenarioCount" style="font-size:1.5rem; font-weight:bold; color:#fff;">0</div>
+      </div>
+      <div style="background:var(--dc-bg-primary); padding:12px; border-radius:6px;">
+        <div style="font-size:0.8rem; color:var(--dc-text-muted);">投稿済</div>
+        <div id="postedScenarioCount" style="font-size:1.5rem; font-weight:bold; color:var(--dc-green-fg);">0</div>
+      </div>
+      <div style="background:var(--dc-bg-primary); padding:12px; border-radius:6px;">
+        <div style="font-size:0.8rem; color:var(--dc-text-muted);">未投稿</div>
+        <div id="unpostedScenarioCount" style="font-size:1.5rem; font-weight:bold; color:var(--dc-yellow-fg);">0</div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">
+      📚 シナリオライブラリ
+      <span class="import-btns"><button type="button" class="btn btn-secondary" data-import-pick="folder" title="フォルダを選んで、シナリオとして登録（ドラッグ＆ドロップが使えないとき用）">📁 フォルダを選んで登録</button><button type="button" class="btn btn-secondary" data-import-pick="files" title="PDF・ZIP・画像を選んで、シナリオとして登録">📄 PDF・ZIPを選んで登録</button><button class="btn btn-secondary btn-success" data-on-click="openAddScenarioModal">＋ 新規シナリオ手動追加</button></span>
+    </div>
+    <div id="dbCardContainer" class="scenario-grid"></div>
+    <div id="dbTableContainer" style="display:none; overflow-x:auto;">
+      <table class="db-table">
+        <thead>
+          <tr>
+            <th style="width:70px;">画像</th><th>シナリオ名</th><th>システム</th><th>人数 / 時間</th><th>投稿状態</th><th>投稿済チャンネル</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="dbTableBody"></tbody>
+      </table>
+    </div>
+    <div id="dbMoreWrap" style="text-align:center; margin-top:12px;"></div>
+  </div>
+</div>
+
+<!-- ダイレクト編集モーダル -->
+<!-- ダイレクト編集モーダル -->
+<div id="editScenarioModal" class="modal-overlay">
+    <div class="modal-card scenario-window sw-preview">
+      <div class="sw-head">
+        <div class="sw-title" id="swTitle">シナリオ</div>
+        <div class="sw-modes"><button type="button" id="swModePreview" data-sw="preview">👁 プレビュー</button><button type="button" id="swModeEdit" data-sw="edit">✏️ 編集</button></div>
+        <button type="button" class="btn-sort" id="swSave" data-sw="save" style="display:none;">💾 保存して閉じる</button>
+        <button type="button" class="btn-sort" data-sw="close" title="閉じる（Esc）">✕</button>
+      </div>
+      <div id="swTabs"></div>
+      <div id="swBody"></div>
+    </div>
+  </div>
+
+<!-- 新規シナリオ手動追加 モーダル -->
+<div id="addScenarioModal" class="modal-overlay">
+  <div class="modal-card">
+    <div class="card-title">📝 新規シナリオ手動追加<button type="button" class="btn-sort" data-on-click="closeAddScenarioModal">✕</button></div>
+    <form data-on-submit="handleManualAddScenario-event">
+      <div class="form-group"><label>シナリオタイトル<span class="req">*</span></label><input type="text" id="mTitle" required placeholder="例: サンプルシナリオA"></div>
+      <div class="grid-2">
+        <div class="form-group"><label>システム</label><input type="text" id="mSystem" placeholder="例: システム名"></div>
+        <div class="form-group"><label>ショップURL</label><input type="url" id="mShopUrl" placeholder="https://..."></div>
+      </div>
+      <div class="grid-2">
+        <div class="form-group"><label>プレイ人数</label><textarea id="mPlayerCount" class="short-input" placeholder="例: 4人"></textarea></div>
+        <div class="form-group"><label>プレイ時間</label><textarea id="mPlayTime" class="short-input" placeholder="例: 3〜4時間"></textarea></div>
+      </div>
+      <div class="grid-3">
+        <div class="form-group"><label>必須技能</label><textarea id="mReqSkills" class="short-input" placeholder="例: 必須技能1、必須技能2"></textarea></div>
+        <div class="form-group"><label>推奨技能</label><textarea id="mRecSkills" class="short-input" placeholder="例: 推奨技能1、推奨技能2"></textarea></div>
+        <div class="form-group"><label>準推奨技能</label><textarea id="mSemiRecSkills" class="short-input" placeholder="例: 準推奨技能1、準推奨技能2"></textarea></div>
+      </div>
+      <div class="grid-2">
+        <div class="form-group"><label>ロスト率</label><textarea id="mLostRate" class="short-input" placeholder="例: 低"></textarea></div>
+        <div class="form-group"><label>後遺症</label><textarea id="mAftereffect" class="short-input" placeholder="例: なし"></textarea></div>
+      </div>
+      <div class="form-group">
+        <label>サムネイル画像 (ドラッグ＆ドロップ または URL指定)</label>
+        <div class="drop-zone" id="mDropZone" data-on-click="document-getElementById-mFileInput-click" data-on-dragover="handleDragOver-event" data-on-dragleave="handleDragLeave-event" data-on-drop="handleManualImageDrop-event">
+          <span id="mDropText">📷 画像ファイルをここにドロップ または クリックして選択</span>
+          <input type="file" id="mFileInput" accept="image/*" style="display:none;" data-on-change="handleManualImageSelect-event">
+        </div>
+        <input type="text" id="mImageUrl" placeholder="https://... または画像をドロップ" style="margin-top:6px;">
+      </div>
+      <div class="form-group"><label>あらすじ・トレーラー</label><textarea id="mTrailer" placeholder="あらすじ..."></textarea></div>
+      <div class="form-group"><label>注意事項・備考</label><textarea id="mNotes" placeholder="注意事項..."></textarea></div>
+      <div class="actions-right">
+        <button type="button" class="btn btn-secondary btn-md" data-on-click="closeAddScenarioModal">キャンセル</button>
+        <button type="submit" class="btn btn-success btn-md">💾 データベースに登録</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ♟️ ココフォリア準備（中身は app_test59_23_ccfolia.js が作る） -->
+<div id="ccfoliaTab" class="tab-content"></div>
+
+<!-- 3. 投稿履歴画面 -->
+
+<div id="historyTab" class="tab-content">
+  <div class="card">
+    <div class="card-title">📜 過去の投稿ログ<button class="btn btn-secondary btn-danger" data-on-click="clearHistory">ログ消去</button></div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+      <input type="text" id="historySearchInput" placeholder="🔍 日時・シナリオ名・チャンネル・タグで検索（スペースでAND）" style="flex:1; min-width:220px; padding:6px 10px;" data-on-input="renderHistoryTable">
+      <button type="button" class="btn btn-secondary" data-on-click="document-getElementById-historySearchInp">クリア</button>
+      <span id="historyResultCount" class="search-count"></span>
+    </div>
+    <table>
+      <thead><tr><th>投稿日時</th><th>シナリオ名</th><th>投稿先チャンネル</th><th>付与タグ</th><th>スレッド</th></tr></thead>
+      <tbody id="historyTableBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 4. 初期設定 ＆ 記号カスタマイズ画面 -->
+<div id="settingsModal" class="sm-overlay"><div class="settings-window" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+<div class="sm-head"><div class="sm-title" id="settingsTitle">⚙️ 初期設定 <small>Bot・記号・チャンネル・バックアップ</small></div><button type="button" class="btn-sort" id="settingsCloseBtn" data-on-click="close-settings">✕ 閉じる</button></div>
+<div id="settingsTab" class="settings-body">
+  <div class="card">
+    <div class="card-title">🤖 Bot・投稿の基本設定</div>
+    <div class="bot-grid">
+      <div class="bot-side">
+      <div class="bot-avatar drop-zone" title="Botアイコン：クリックして選択、または画像をドラッグ＆ドロップ" data-on-click="document-getElementById-botAvatarInput-click" data-on-dragover="handleDragOver-event" data-on-dragleave="handleDragLeave-event" data-on-drop="handleBotAvatarDrop-event">
+        <span id="botAvatarDropText">📷</span>
+        <input type="file" id="botAvatarInput" accept="image/*" style="display:none;" data-on-change="handleBotAvatarSelect-event">
+        <img id="botAvatarPreview" class="image-preview-thumb" style="display:none;" alt="">
+      </div>
+      <button type="button" class="btn-sort" data-on-click="pick-bot-avatar">🖼️ ギャラリーから選ぶ</button>
+      <button type="button" class="btn-sort btn-danger" style="display:none;" id="botAvatarClearBtn" data-on-click="clearBotAvatar">🗑️ アイコン解除</button>
+      </div>
+      <div class="bot-fields">
+      <div class="form-group"><label for="botName">Bot表示名</label><input type="text" id="botName" value="概要投稿Bot" data-on-input="appState-botName-this-value-saveState-tr"></div>
+      <div class="form-group"><label for="maxAttachMB">添付の上限</label><div class="bot-unit"><input type="number" id="maxAttachMB" min="1" max="500" step="0.5" value="9.5" data-on-input="saveMaxAttach-this-value"><span>MB</span></div></div>
+      </div>
+    </div>
+    <details class="set-note"><summary>アイコン・添付上限について</summary><p>アイコンは、投稿直前にWebhook自体のアイコンを更新して反映します（解除すると次の投稿時に初期アイコンへ戻します）。表示名は投稿ごとに指定するので、Webhookの名前は変更しません。添付上限はサーバーのブースト状況で異なります。この値を超える画像は圧縮した画像で送り、1通の合計が超える場合は投稿前にお知らせします。</p></details>
+  </div>
+  <div class="card">
+    <div class="card-title">🎨 フォーマット・記号</div>
+    <div class="cfg-table" role="group" aria-label="フォーマット記号の設定">
+      <div class="cfg-row"><div class="cfg-name">通常</div><label class="cfg-f"><span>見出し(h1)</span><input type="text" id="cfgH1" data-on-input="saveFormatConfig-renderPreview"></label><div class="cfg-f cfg-blank"></div></div>
+      <div class="cfg-row"><div class="cfg-name">概要まとめ</div><label class="cfg-f"><span>項目カッコ 前</span><input type="text" id="cfgSubPre" data-on-input="saveFormatConfig-renderPreview"></label><label class="cfg-f"><span>項目カッコ 後</span><input type="text" id="cfgSubPost" data-on-input="saveFormatConfig-renderPreview"></label></div>
+      <div class="cfg-row"><div class="cfg-name">シンプル</div><label class="cfg-f"><span>見出し</span><input type="text" id="cfgSimpleH1" data-on-input="saveFormatConfig-renderPreview"></label><label class="cfg-f"><span>箇条書き</span><input type="text" id="cfgSimpleList" data-on-input="saveFormatConfig-renderPreview"></label></div>
+      <div class="cfg-row"><div class="cfg-name">ファンシー</div><label class="cfg-f"><span>見出し</span><input type="text" id="cfgFancyH1" data-on-input="saveFormatConfig-renderPreview"></label><label class="cfg-f"><span>箇条書き</span><input type="text" id="cfgFancyList" data-on-input="saveFormatConfig-renderPreview"></label></div>
+    </div>
+    <div class="fmt-sub">自分のフォーマット <span>（ブロックの装飾プルダウンに「🎨 名前」として出ます）</span></div>
+    <div id="customFormatList"></div>
+    <button type="button" class="btn btn-secondary btn-sm" data-fmt-act="add">＋ フォーマットを追加</button>
+  </div>
+  <div class="card">
+    <div class="card-title">🔗 投稿先フォーラム & タグIDマトリクス設定</div>
+    <details class="set-note"><summary>Webhook URLの扱いについて</summary><p>※Webhook URLはクラウド同期にも含まれます。Firestoreのルールで「本人のみ読み書き可」になっていることを確認してください。入力欄は編集中以外は伏せ字で表示されます。</p></details>
+    <div id="channelConfigList"></div>
+    <button type="button" class="btn btn-secondary" data-on-click="addChannelConfig">＋ チャンネルを追加</button>
+  </div>
+
+  <div class="actions-right" style="margin-bottom:16px;">
+    <button type="button" class="btn btn-md" data-on-click="saveSettings">💾 設定を保存する</button>
+  </div>
+
+  <div class="card" id="backupCard">
+    <div class="card-title">📦 バックアップ（全データ インポート / エクスポート）</div>
+    <div id="storageInfo" class="storage-info" aria-live="polite"></div>
+    <details class="set-note"><summary>バックアップについて</summary><p>シナリオDB・投稿履歴・チャンネル設定・画像を、1つのJSONファイルにまとめて保存／復元します。復元すると現在のデータはファイルの内容で置き換わります（直前のデータは自動でバックアップされます）。<br>※ Webhook URLも含まれるため、ファイルは他人に共有しないでください。</p></details>
+    <div class="actions-right" style="margin-top:0;">
+      <button type="button" class="btn btn-secondary btn-md" data-on-click="exportData">💾 JSONに保存</button>
+      <button type="button" class="btn btn-secondary btn-md" data-on-click="document-getElementById-importFile-click">📂 JSONから復元</button>
+      <input type="file" id="importFile" accept=".json" style="display:none;" data-on-change="importData-event">
+      <button type="button" class="btn btn-secondary btn-md" data-on-click="exportPreV3Backup">🕰 移行前データをJSONで書き出し</button>
+    </div>
+  </div>
+</div>
+</div></div>
+
+</main>
+  </div>
+
+<script src="app_test59_00_block_common.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" defer crossorigin="anonymous" referrerpolicy="no-referrer" data-pdfjs="main"></script>   <!-- STEP 2：PDFの文字を読む（pdf.js）。読み込めなくてもアプリは動き、スペックの自動推測だけが使えなくなる -->
+<script src="app_test59_01_state_model.js"></script>
+<script src="app_test59_02_storage_images.js"></script>
+<script src="app_test59_03_ui_basics.js"></script>
+<script src="app_test59_04_forms_blocks.js"></script>
+<script src="app_test59_05_channels_save_sync.js"></script>
+<script src="app_test59_06_post.js"></script>
+<script src="app_test59_07_boot.js"></script>
+<script src="app_test59_08_events.js"></script>
+<script src="app_test59_09_actions.js"></script>
+<script src="app_test59_10_secret_ho.js"></script>
+<script src="app_test59_11_custom_formats.js"></script>
+<script src="app_test59_12_scenario_window.js"></script>
+<script src="app_test59_13_shell.js"></script>
+<script src="app_test59_14_gallery.js"></script>
+<script src="app_test59_15_gallery_explorer.js"></script>
+<script src="app_test59_16_asset_store.js"></script>
+<script src="app_test59_17_scenario_detail.js"></script>
+<script src="app_test59_18_theme.js"></script>
+<script src="app_test59_19_scenario_guess.js"></script>
+<script src="app_test59_20_scenario_import.js"></script>
+<script src="app_test59_21_pdf_extract.js"></script>
+<script src="app_test59_22_pdf_viewer.js"></script>
+<script src="app_test59_23_ccfolia.js"></script>
+<script src="app_test59_24_npc_parse.js"></script>
+<script src="app_test59_25_ccfolia_export.js"></script>
+<script src="app_test59_26_ccfolia_npc_ui.js"></script>
+
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+  import {
+    getAuth, signInWithPopup, GoogleAuthProvider,
+    createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail,
+    onAuthStateChanged, signOut
+  } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+  import { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, serverTimestamp }
+    from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+  // ★ true にすると、未ログイン時はログイン画面が閉じられなくなります（ログイン必須）
+  const REQUIRE_LOGIN = false;
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAZnPBuUY5m-N0AmtP41bGKSyG3_4d22cs",
+    authDomain: "discord-forum-tool.firebaseapp.com",
+    projectId: "discord-forum-tool",
+    storageBucket: "discord-forum-tool.firebasestorage.app",
+    messagingSenderId: "714872282390",
+    appId: "1:714872282390:web:32681c17137bfbbee58437"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  window.__fbLoaded = true;
+
+  // 要素取得
+  const loginBtn = document.getElementById('login-btn');
+  const logoutBtn = document.getElementById('logout-btn');
+  const loginStatus = document.getElementById('login-status');
+  const overlay = document.getElementById('auth-overlay');
+  const closeBtn = document.getElementById('auth-close');
+  const errorDisplay = document.getElementById('auth-error');
+
+  function openModal() { overlay.classList.add('open'); }
+  function closeModal() { overlay.classList.remove('open'); }
+  const AUTH_MSG = { 'auth/invalid-email': 'メールアドレスの形式が正しくありません', 'auth/email-already-in-use': 'このメールアドレスは既に登録されています', 'auth/weak-password': 'パスワードは6文字以上にしてください', 'auth/invalid-credential': 'メールアドレスまたはパスワードが違います', 'auth/user-not-found': 'アカウントが見つかりません', 'auth/wrong-password': 'パスワードが違います', 'auth/popup-closed-by-user': 'ログインがキャンセルされました', 'auth/cancelled-popup-request': 'ログインがキャンセルされました', 'auth/operation-not-allowed': 'この方法のログインはFirebaseで有効化されていません', 'auth/user-disabled': 'このアカウントは無効化されています', 'auth/popup-blocked': 'ポップアップがブロックされました。許可してから再度お試しください', 'auth/network-request-failed': 'ネットワークに接続できません', 'auth/too-many-requests': '試行回数が多すぎます。しばらく待ってください', 'auth/unauthorized-domain': 'このドメインはFirebaseの承認済みドメインに登録されていません' };
+  function showError(error) {
+    console.error(error);
+    errorDisplay.textContent = "エラー: " + (AUTH_MSG[error.code] || error.message || error);
+  }
+
+  loginBtn.addEventListener('click', () => { errorDisplay.textContent = ""; openModal(); });
+  closeBtn.addEventListener('click', closeModal);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open') && !(REQUIRE_LOGIN && !auth.currentUser)) closeModal(); });
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay && !(REQUIRE_LOGIN && !auth.currentUser)) closeModal();
+  });
+
+  // ① Google
+  document.getElementById('btn-google-login').addEventListener('click', () => {
+    errorDisplay.textContent = "";
+    signInWithPopup(auth, new GoogleAuthProvider()).catch(showError);
+  });
+
+  // ② メール（新規登録／ログイン）
+  function getEmailPw() {
+    const email = document.getElementById('email-input').value.trim();
+    const password = document.getElementById('password-input').value;
+    if (!email || !password) { showError({ message: "メールとパスワードを入力してください" }); return null; }
+    return { email, password };
+  }
+  document.getElementById('btn-email-signup').addEventListener('click', () => {
+    errorDisplay.textContent = "";
+    const v = getEmailPw(); if (!v) return;
+    createUserWithEmailAndPassword(auth, v.email, v.password).catch(showError);
+  });
+  document.getElementById('btn-email-login').addEventListener('click', () => {
+    errorDisplay.textContent = "";
+    const v = getEmailPw(); if (!v) return;
+    signInWithEmailAndPassword(auth, v.email, v.password).catch(showError);
+  });
+
+  document.getElementById('btn-pw-reset').addEventListener('click', () => {
+    errorDisplay.textContent = "";
+    const email = document.getElementById('email-input').value.trim();
+    if (!email) return showError({ message: "メールアドレスを入力してください" });
+    sendPasswordResetEmail(auth, email).then(() => { errorDisplay.textContent = "再設定メールを送信しました。"; }).catch(showError);
+  });
+
+  // ログアウト
+  logoutBtn.addEventListener('click', () => {
+    signOut(auth).catch((error) => console.error("ログアウトエラー:", error));
+  });
+
+  // ===== クラウド同期（Firestore） =====
+  // users/{uid}/sync/settings        … 設定・チャンネル・履歴＋画像の一覧（images: {ID: 分割数}）
+  // users/{uid}/scenarios/{id}       … シナリオ1件（画像は @img:ID に置き換えて軽量化）
+  // users/{uid}/images/{ID}_{番号}   … 画像本体（1ドキュメント約1MBの制限を避けるため分割保存）
+  const syncStatus = document.getElementById('sync-status');
+  const DIRTY_KEY = 'discord_forum_tool_dirty';
+  const OWNER_KEY = 'discord_forum_tool_owner';
+  const lastKey = (uid) => `discord_forum_tool_cloud_last_${uid}`;
+  const IMG_RE = /data:[a-zA-Z0-9.+\/-]+;base64,[A-Za-z0-9+\/=]+/g;
+  const REF_RE = /@img:([a-z0-9]+)/g;
+  const CHUNK = 800000;   // 1ドキュメントに入れる画像データの最大文字数
+  let cloudUser = null, cloudIndex = null, cloudImages = new Map();
+  let saveTimer = null, saving = false, pending = false, syncBlocked = false, deleteGuardDeclined = false;
+
+  const setSync = (t) => { syncStatus.textContent = t; };
+  const settingsRef = (uid) => doc(db, 'users', uid, 'sync', 'settings');
+  const scenCol = (uid) => collection(db, 'users', uid, 'scenarios');
+  const imgCol = (uid) => collection(db, 'users', uid, 'images');
+
+  // hashStr は上のスクリプトのものを共用（画像IDがずれないよう1か所で管理）
+  function scenId(sc) {
+    if (sc && sc.id) return 's_' + String(sc.id).replace(/[^A-Za-z0-9_-]/g, '');
+    const title = sc && sc.title;
+    let h = 5381;
+    for (const c of String(title)) h = ((h * 33) ^ c.codePointAt(0)) >>> 0;
+    return `s_${h.toString(36)}_${String(title).length}`;
+  }
+  // オブジェクト → 画像を @img:ID に置き換えた JSON 文字列（画像は images に集める）
+  function externalize(obj, images) {
+    return JSON.stringify(obj).replace(IMG_RE, (m) => {
+      const h = hashStr(m); images.set(h, m); return '@img:' + h;
+    });
+  }
+
+  async function loadIndex(uid) {
+    const snap = await getDocs(scenCol(uid));
+    cloudIndex = new Map();
+    snap.forEach(d => cloudIndex.set(d.id, d.data()));
+  }
+
+  async function fetchCloudImage(uid, h, total) {
+    total = Number(total) || 1; const parts = [];
+    for (let i = 0; i < total; i++) { const d = await getDoc(doc(imgCol(uid), `${h}_${i}`)); if (!d.exists()) return null; parts.push(d.data().data); }
+    return parts.join('');
+  }
+  window.cloudFetchImage = (h) => cloudUser ? fetchCloudImage(cloudUser.uid, h, cloudImages.get(h)) : Promise.resolve(null);
+
+  async function uploadImage(uid, h, data) {
+    const total = Math.ceil(data.length / CHUNK);
+    for (let i = 0; i < total; i++) {
+      await setDoc(doc(imgCol(uid), `${h}_${i}`), { h, i, total, data: data.slice(i * CHUNK, (i + 1) * CHUNK) });
+    }
+    return total;
+  }
+
+  // 別の端末で更新があったとき：シナリオごとに updatedAt の新しい方を採用し、削除は記録(deletedScenarios)で反映して統合する
+  async function mergeRemote(uid, rs) {
+    setSync('☁️ 他の端末の変更を統合中…');
+    await loadIndex(uid);
+    cloudImages = new Map(Object.entries(rs.data().images || {}));
+    const local = window.getAppStateForSync(), remote = JSON.parse(rs.data().json);
+    const tomb = { ...(remote.deletedScenarios || {}) }; Object.entries(local.deletedScenarios || {}).forEach(([k, t]) => { tomb[k] = Math.max(tomb[k] || 0, t); });
+    const cutoff = Date.now() - 90 * 864e5; Object.keys(tomb).forEach(k => { if (tomb[k] < cutoff) delete tomb[k]; });
+    const C = new Map(); [...cloudIndex.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).forEach(v => { try { const c = JSON.parse(v.json); if (c && c.id) C.set(c.id, c); } catch (e) {} });
+    const t = id => tomb[id] || 0, u = x => x.updatedAt || 0, out = [], seen = new Set();
+    for (const sc of local.scenarios) {
+      seen.add(sc.id); const c = C.get(sc.id);
+      if (c) { const w = u(c) > u(sc) ? c : sc, o = w === c ? sc : c; out.push({ ...w, postedChannels: [...new Set([...(w.postedChannels || []), ...(o.postedChannels || [])])], postedInfo: { ...(o.postedInfo || {}), ...(w.postedInfo || {}) } }); }   // 本文は新しい方、投稿済み記録は両方を合算
+      else if (!(t(sc.id) > u(sc))) out.push(sc);   // 他端末で削除済みなら落とす
+    }
+    for (const [id, c] of C) if (!seen.has(id) && !(t(id) >= u(c))) out.push(c);   // 他端末で追加（この端末で削除済みなら除く）
+    const ctomb = { ...(remote.deletedChannels || {}) }; Object.entries(local.deletedChannels || {}).forEach(([k, t]) => { ctomb[k] = Math.max(ctomb[k] || 0, t); }); Object.keys(ctomb).forEach(k => { if (ctomb[k] < cutoff) delete ctomb[k]; });
+    const channels = local.channels.filter(c => !ctomb[c.id]); (remote.channels || []).forEach(c => { if (c && !ctomb[c.id] && !channels.some(x => x.id === c.id)) channels.push(c); });   // 削除済みチャンネルは復活させない
+    const hm = new Map(); [...(remote.history || []), ...(local.history || [])].forEach(h => { if (h) hm.set(h.date + '|' + h.title + '|' + h.channels, h); });
+    const hc = Math.max(remote.historyClearedAt || 0, local.historyClearedAt || 0), hcIso = hc ? new Date(hc).toISOString() : '';   // 履歴の全消去は、それ以前の履歴を両端末から除く
+    const history = [...hm.values()].filter(h => !hcIso || String(h.date) > hcIso).sort((a, b) => String(a.date).localeCompare(String(b.date))).slice(-500);
+    await window.applyMergedState({ scenarios: out, channels, history, deletedScenarios: tomb, deletedChannels: ctomb, historyClearedAt: hc, imageCategories: [...new Set([...(local.imageCategories || []), ...(remote.imageCategories || [])])], imageAssets: (() => { const im = [...(local.imageAssets || [])]; (remote.imageAssets || []).forEach(a => { if (a && !im.some(x => x.id === a.id)) im.push(a); }); return im; })(), formats: (() => { const fm = [...(local.formats || [])]; (remote.formats || []).forEach(f => { if (f && !fm.some(x => x.id === f.id)) fm.push(f); }); return fm; })(), ccfolia: window.mergeCcfolia(local.ccfolia, remote.ccfolia) });
+  }
+
+  // この端末 → クラウド（画像は新しいものだけ、シナリオは変更分だけ書き込む）
+  async function pushToCloud() {
+    const uid = cloudUser.uid;
+    if (syncBlocked) return -1;
+    const rs = await getDoc(settingsRef(uid));
+    if (rs.exists() && rs.data().updatedAt !== Number(localStorage.getItem(lastKey(uid)) || 0)) {
+      await mergeRemote(uid, rs);   // 別端末の更新：上書き確認ではなく、シナリオ単位で統合してから同期
+    }
+    await window.imgFlush();
+    const { scenarios = [], ...rest } = window.getAppStateForSync();
+    const images = new Map();
+    const restJson = externalize(rest, images);
+    const BYTES = (t) => new TextEncoder().encode(t).length, DOC_LIMIT = 1000000;   // Firestore は1ドキュメント約1MiB。画像は別ドキュメントなので、通常は文字データだけ
+    if (BYTES(restJson) > DOC_LIMIT) throw new Error('設定データが1ドキュメントの上限（約1MB）を超えています');
+    const scJsons = scenarios.map(sc => externalize(sc, images));
+    for (const j of [restJson, ...scJsons]) for (const mm of j.matchAll(REF_RE)) if (!images.has(mm[1])) images.set(mm[1], null);   // 端末の画像ストアにある画像
+    let failed = 0;
+
+    // 1) 画像（未保存のものだけ。4件ずつ並列）
+    const manifest = {};
+    const todo = [];
+    for (const [h, data] of images) {
+      if (cloudImages.has(h)) manifest[h] = cloudImages.get(h); else todo.push([h, data]);
+    }
+    for (let i = 0; i < todo.length; i += 4) {
+      setSync(`☁️ 画像を保存中… ${Math.min(i + 4, todo.length)}/${todo.length}`);
+      await Promise.all(todo.slice(i, i + 4).map(async ([h, data]) => {
+        try { if (!data) data = await window.idbImageDataUrl(h); if (!data) return; const total = await uploadImage(uid, h, data); manifest[h] = total; cloudImages.set(h, total); }
+        catch (e) { failed++; console.error('画像の保存に失敗:', e); }
+      }));
+    }
+
+    // 2) シナリオ
+    const keep = new Set();
+    for (let i = 0; i < scenarios.length; i++) {
+      const sc = scenarios[i], id = scenId(sc), json = scJsons[i];
+      keep.add(id);
+      if (BYTES(json) > DOC_LIMIT) { failed++; console.error('シナリオが大きすぎて同期できません:', sc.title); toast('⚠️ 「' + (sc.title || '無題') + '」は文字量が多すぎてクラウド同期できません（約1MBが上限）。内容を分けるか、JSONバックアップで保管してください。'); continue; }   // 同期失敗は通知し、クラウド上の既存データは消さない（keepに入れ済み）
+      const prev = cloudIndex.get(id);
+      if (prev && prev.json === json && prev.order === i) continue;
+      try {
+        await setDoc(doc(scenCol(uid), id), { title: String(sc.title || ''), order: i, json });
+        cloudIndex.set(id, { title: String(sc.title || ''), order: i, json });
+      } catch (e) { failed++; console.error('シナリオ同期失敗:', sc.title, e); }
+    }
+    const stale = [...cloudIndex.keys()].filter(id => !keep.has(id));
+    let skipDelete = false;
+    if (stale.length >= 2 && scenarios.length < cloudIndex.size / 2) {   // 端末側のデータが極端に少ない＝端末データの欠落かもしれない
+      if (!deleteGuardDeclined && !(await appConfirm(`クラウドにあるシナリオ ${cloudIndex.size} 件のうち ${stale.length} 件が、この端末には存在しません。\n\nこれらをクラウドから削除して同期しますか？\n（端末のデータが正しく読み込めていない可能性がある場合は「削除しない」を選んでください）`, { okText: '削除して同期', cancelText: '削除しない', danger: true, strict: true }))) deleteGuardDeclined = true;
+      skipDelete = deleteGuardDeclined;
+    }
+    if (skipDelete) {   // 削除しない：対象シナリオが使う画像も残す
+      stale.forEach(id => { const js = (cloudIndex.get(id) || {}).json || ''; for (const mm of js.matchAll(REF_RE)) { if (!images.has(mm[1])) images.set(mm[1], null); if (cloudImages.has(mm[1])) manifest[mm[1]] = cloudImages.get(mm[1]); } });
+      failed++;   // 未完了として扱い、画面に警告を残す
+    } else {
+      for (const id of stale) {
+        try { await deleteDoc(doc(scenCol(uid), id)); cloudIndex.delete(id); }
+        catch (e) { failed++; console.error('シナリオ削除失敗:', id, e); }
+      }
+    }
+
+    // 3) 使われなくなった画像を削除
+    for (const [h, total] of [...cloudImages]) {
+      if (images.has(h)) continue;
+      try {
+        for (let i = 0; i < total; i++) await deleteDoc(doc(imgCol(uid), `${h}_${i}`));
+      } catch (e) { console.error('画像の削除に失敗:', e); }
+      cloudImages.delete(h);
+    }
+
+    // 4) 設定＋画像一覧
+    const at = Date.now();
+    await setDoc(settingsRef(uid), { json: restJson, images: manifest, updatedAt: at });
+    localStorage.setItem(lastKey(uid), String(at));
+    if (!failed) localStorage.removeItem(DIRTY_KEY);
+    return failed;
+  }
+
+  async function runSave() {
+    if (!cloudUser || !cloudIndex) return;
+    if (saving) { pending = true; return; }
+    saving = true;
+    setSync('☁️ 同期中…');
+    try {
+      const failed = await pushToCloud();
+      setSync(failed === -1 ? '⚠️ 未同期（他端末で更新あり）' : failed ? '⚠️ 一部同期できず' : '☁️ 同期済み');
+    } catch (e) {
+      console.error(e);
+      setSync('⚠️ 同期エラー');
+    }
+    saving = false;
+    if (pending) { pending = false; runSave(); }
+  }
+
+  // saveState() から呼ばれる（1.5秒まとめて1回だけ書き込む）
+  window.cloudScheduleSave = function () {
+    if (!cloudUser || !cloudIndex) return;
+    clearTimeout(saveTimer);
+    setSync('☁️ 同期待ち…');
+    saveTimer = setTimeout(runSave, 1500);
+  };
+
+  // クラウド → この端末（バックアップを残して読み込み、再読み込み）
+  async function applyCloudAndReload(uid, snap) {
+    setSync('☁️ 読み込み中…');
+    const manifest = snap.data().images || {};
+    const need = new Set(); for (const mm of snap.data().json.matchAll(REF_RE)) need.add(mm[1]);
+    const imgMap = new Map();
+    for (const h of need) { const d = await fetchCloudImage(uid, h, manifest[h]); if (d) imgMap.set(h, d); }   // 設定内の画像（アバター）だけ先に取得
+    const rest = JSON.parse(snap.data().json.replace(REF_RE, (m, h) => imgMap.get(h) || ''));
+    const list = [...cloudIndex.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const scenarios = list.map(v => JSON.parse(v.json));   // シナリオの画像は @img:ID のまま。必要な画像はログイン後に端末へ取り込む
+
+    const old = (await window.idbGetRaw('state')) || localStorage.getItem('discord_forum_tool_data_v1');
+    if (old) await window.idbSetRaw('state_backup', old);   // 念のため元のデータを残す
+    await window.idbSetRaw('state', JSON.stringify({ ...rest, scenarios }));
+    try { localStorage.removeItem('discord_forum_tool_data_v1'); } catch (e) {}
+    localStorage.setItem(lastKey(uid), String(snap.data().updatedAt));
+    localStorage.removeItem(DIRTY_KEY);
+    location.reload();
+  }
+
+  async function syncClock(uid) {   // サーバー時刻を1回書き込んで読み戻し、端末の時計との差を求める（失敗しても端末の時計で動作）
+    try {
+      const ref = doc(db, 'users', uid, 'sync', 'clock'), t0 = Date.now();
+      await setDoc(ref, { t: serverTimestamp() }); const s = await getDoc(ref), t1 = Date.now();
+      const st = s.exists() && s.data().t && s.data().t.toMillis(); if (st) window.setClockOffset(Math.round(st - (t0 + t1) / 2));
+    } catch (e) { console.warn('サーバー時刻の取得に失敗（端末の時計を使用します）', e); }
+  }
+  async function cloudOnLogin(user) {
+    syncBlocked = false; deleteGuardDeclined = false; window.cloudImagesReady = false;
+    cloudUser = user;
+    await syncClock(user.uid);
+    cloudIndex = null;
+    cloudImages = new Map();
+    setSync('☁️ 確認中…');
+    try {
+      await window.appReady;
+      { const owner = localStorage.getItem(OWNER_KEY);
+        if (owner && owner !== user.uid) {
+          if (!(await appConfirm('この端末には別のアカウントのデータが残っています。\n続けると、このアカウントのクラウドデータに切り替えます（端末の現在のデータはバックアップとして残します）。\n※クラウドに何もない場合は空の状態から始まります。', { okText: '切り替える', cancelText: 'ログアウト', strict: true }))) { signOut(auth).catch(() => {}); return; }
+          const oldData = await window.idbGetRaw('state'); if (oldData) await window.idbSetRaw('state_backup_' + owner, oldData);
+          localStorage.setItem(OWNER_KEY, user.uid);
+          await loadIndex(user.uid);
+          const st = await getDoc(settingsRef(user.uid));
+          if (st.exists()) { await applyCloudAndReload(user.uid, st); return; }
+          await window.idbSetRaw('state', '{}'); await window.idbSetRaw('draft', ''); localStorage.removeItem(lastKey(user.uid)); location.reload(); return;
+        }
+        localStorage.setItem(OWNER_KEY, user.uid); }   // 端末のデータの読み込み完了を待つ（空の状態で上書きしないため）
+      await loadIndex(user.uid);
+      if (!cloudUser || cloudUser.uid !== user.uid) return;
+      const snap = await getDoc(settingsRef(user.uid));
+      if (snap.exists()) cloudImages = new Map(Object.entries(snap.data().images || {}));
+      const last = Number(localStorage.getItem(lastKey(user.uid)) || 0);
+
+      if (!snap.exists()) {                       // 初回：この端末のデータをクラウドへ
+        const f = await pushToCloud();
+        setSync(f ? '⚠️ 一部同期できず' : '☁️ 同期済み');
+      } else if (snap.data().updatedAt === last) { // 前回から変化なし
+        if (localStorage.getItem(DIRTY_KEY)) {
+          const f = await pushToCloud();
+          setSync(f ? '⚠️ 一部同期できず' : '☁️ 同期済み');
+        } else setSync('☁️ 同期済み');
+      } else if (last) {   // 別の端末で更新済み：シナリオ単位で自動統合して同期
+        const f = await pushToCloud();
+        setSync(f ? '⚠️ 一部同期できず' : '☁️ 同期済み');
+      } else {   // この端末は初回：クラウドか端末かを選ぶ
+        const useCloud = await appConfirm('クラウドに保存されたデータがあります。\n\n「クラウドを読み込む」：この端末のデータは置き換わります（念のためバックアップを残します）。\n「この端末で上書き」：クラウドの内容がこの端末のデータで置き換わります。', { okText: 'クラウドを読み込む', cancelText: 'この端末で上書き', strict: true });
+        if (useCloud) { await applyCloudAndReload(user.uid, snap); return; }
+        localStorage.setItem(lastKey(user.uid), String(snap.data().updatedAt));
+        const f = await pushToCloud();
+        setSync(f ? '⚠️ 一部同期できず' : '☁️ 同期済み');
+      }
+      window.cloudImagesReady = true; if (window.fetchMissingImages) window.fetchMissingImages();
+    } catch (e) {
+      console.error(e);
+      setSync('⚠️ 同期エラー（Firestoreの設定を確認）');
+    }
+  }
+
+  function cloudOnLogout() {
+    clearTimeout(saveTimer);
+    cloudUser = null; cloudIndex = null; cloudImages = new Map(); window.cloudImagesReady = false;
+    setSync('');
+  }
+
+  // ログイン状態の監視
+  onAuthStateChanged(auth, (user) => {
+    if (user && user.isAnonymous) {   // 以前の合言葉（匿名）ログインが残っていたらログアウト
+      signOut(auth).catch(() => {});
+      return;
+    }
+    if (user) {
+      let displayName = "ゲストさん";
+      if (user.email) displayName = user.email;
+      if (user.displayName) displayName = user.displayName;
+
+      loginStatus.innerText = displayName;
+      loginBtn.style.display = "none";
+      logoutBtn.style.display = "inline-block";
+      
+      cloudOnLogin(user);
+
+      closeModal();
+    } else {
+      loginStatus.innerText = "未ログイン";
+      loginBtn.style.display = "inline-block";
+      logoutBtn.style.display = "none";
+      cloudOnLogout();
+      document.getElementById('password-input').value = "";
+      if (REQUIRE_LOGIN) openModal();
+    }
+  });
+</script>
+
+</body>
+</html>

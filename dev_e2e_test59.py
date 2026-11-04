@@ -1,0 +1,617 @@
+import base64
+# ブラウザでの自動テスト（開発用・本番には不要）。実際のChromiumでアプリを開き、画面を操作して確認します。
+# 準備: pip install playwright && playwright install chromium
+# 使い方: python dev_e2e_test59.py [HTML等のあるフォルダ]   （Discordへの通信は偽のレスポンスに差し替えるので、実際には送信されません）
+import asyncio,sys,json,re
+from playwright.async_api import async_playwright
+import os,glob,pathlib
+DIR=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else '.').resolve()   # HTML/CSS/JSのあるフォルダ（最新バージョンのHTMLを自動で選ぶ）
+_h=str(DIR/'index.html'); URL=pathlib.Path(_h).as_uri()   # 分割版のHTMLは index.html
+LAUNCH={'args':['--no-sandbox']}
+if os.environ.get('CHROME_PATH'): LAUNCH['executable_path']=os.environ['CHROME_PATH']   # 既存のChromeを使う場合に指定
+
+PNG_BYTES = list(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg=='))
+async def drop_entries(pg, selector, specs):
+    await pg.evaluate("""([sel, specs]) => { const mkFile = s => new File([new Uint8Array(s.bytes || [1])], s.name, { type: s.type || '' });
+      const items = specs.map(sp => sp.dir ? { kind: 'file', webkitGetAsEntry: () => { let sent = false; const es = sp.files.map(f => f.isdir ? { isFile: false, isDirectory: true, name: f.name } : { isFile: true, isDirectory: false, name: f.name, file: cb => cb(mkFile(f)) });
+          return { isDirectory: true, isFile: false, name: sp.dir, createReader: () => ({ readEntries: cb => { if (sent) cb([]); else { sent = true; cb(es); } } }) }; }, getAsFile: () => new File([], sp.dir) }
+        : { kind: 'file', webkitGetAsEntry: () => null, getAsFile: () => mkFile(sp.file) });
+      const ev = new Event('drop', { bubbles: true, cancelable: true }); ev.dataTransfer = { items, files: items.map(i => i.getAsFile()), types: ['Files'] }; document.querySelector(sel).dispatchEvent(ev); }""", [selector, specs])
+async def drop_files(pg, selector, specs):
+    await pg.evaluate("""([sel, specs]) => { const dt = new DataTransfer(); specs.forEach(s => { dt.items.add(new File([new Uint8Array(s.bytes || [1])], s.name, { type: s.type || '' })); if (s.path) window.__paths[s.name] = s.path; });
+      document.querySelector(sel).dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })); }""", [selector, specs])
+
+res=[]; 
+def ok(c,m,extra=''):
+    res.append(bool(c)); print(('OK  ' if c else 'NG  ')+m+((' ('+str(extra)+')') if (not c and extra!='') else ''))
+async def newpage(b,hooks,home=False,electron=False,w=1300):
+    ctx=await b.new_context(viewport={'width':w,'height':900}); pg=await ctx.new_page(); pg.errs=[]; pg.reqs=[]
+    pg.on('pageerror',lambda e:pg.errs.append(str(e)))
+    async def wh(route):
+        r=route.request; pg.reqs.append((r.method,r.url,r.post_data or ''))
+        if r.method=='GET': return await route.fulfill(status=200,content_type='application/json',body=json.dumps({'id':'1','guild_id':'999','name':'wh'}))
+        if r.method=='PATCH': return await route.fulfill(status=200,content_type='application/json',body='{}')
+        return await route.fulfill(status=200,content_type='application/json',body=json.dumps({'id':'111','channel_id':'222','guild_id':'999'}))
+    await pg.route('https://discord.com/api/webhooks/**',wh)
+    await pg.route('https://www.gstatic.com/**',lambda r:r.abort()); await pg.route('https://*.googleapis.com/**',lambda r:r.abort())
+    await pg.goto(URL); await pg.wait_for_timeout(1800)
+    if not home: await pg.evaluate("switchTab('postTab')"); await pg.wait_for_timeout(150)
+    return pg
+async def go(pg,tab):
+    await pg.evaluate("(t)=>switchTab(t)",tab); await pg.wait_for_timeout(200)
+async def seed_channel(pg):
+    await pg.evaluate("""()=>{appState.channels=[{id:'ch1',name:'テストフォーラム',webhookUrl:'https://discord.com/api/webhooks/1/abc',tags:[{name:'募集',id:'123456789012345678'}]}];saveState();renderChannelConfigList();renderChannelCheckboxes();updateTagCheckboxes();}""")
+async def click_btn(pg,text):
+    await pg.locator('button',has_text=text).last.click()
+async def main():
+    async with async_playwright() as p:
+        b=await p.chromium.launch(**LAUNCH)
+        # T1 起動・タブ
+        pg=await newpage(b,None); ok(not pg.errs,'T1 起動時にスクリプトエラーがない',pg.errs[:2])
+        for t in ['databaseTab','historyTab','settingsTab','postTab']:
+            await go(pg,t)
+            ok(await pg.evaluate(f"document.getElementById('{t}').classList.contains('active')"),f'T1 タブ切替 {t}')
+        # T2 ブロック操作
+        n0=await pg.evaluate('blockOrder.length'); await pg.locator('button[data-on-click="addSplitBlock"]').click()
+        ok(await pg.evaluate('blockOrder.length')==n0+1,'T2 分割ブロックを追加')
+        ids=await pg.evaluate('blockOrder.map(b=>b.id)'); last=ids[-1]
+        await pg.locator(f'#sortableBlockContainer [data-ba="up"][data-bid="{last}"]').click()
+        ids2=await pg.evaluate('blockOrder.map(b=>b.id)'); ok(ids2[-2]==last,'T2 ↑で並び順が変わる(IDで特定)')
+        await pg.locator(f'#sortableBlockContainer [data-ba="down"][data-bid="{last}"]').click()
+        ok((await pg.evaluate('blockOrder.map(b=>b.id)'))[-1]==last,'T2 ↓で戻る')
+        sid=await pg.evaluate("blockOrder.find(b=>b.type==='summary_container').id"); ni=await pg.evaluate("blockOrder.find(b=>b.type==='summary_container').items.length")
+        if await pg.evaluate(f"blockOrder.find(b=>b.id==='{sid}').collapsed"): await pg.locator(f'[data-ba="toggle"][data-bid="{sid}"] .type-badge').first.click()
+        await pg.locator(f'[data-ba="item-add"][data-bid="{sid}"]').click(); ok(await pg.evaluate("blockOrder.find(b=>b.type==='summary_container').items.length")==ni+1,'T2 概要項目の追加')
+        await pg.locator(f'[data-ba="item-del"][data-bid="{sid}"]').last.click(); ok(await pg.evaluate("blockOrder.find(b=>b.type==='summary_container').items.length")==ni,'T2 概要項目の削除')
+        c0=await pg.evaluate(f"blockOrder.find(b=>b.id==='{sid}').collapsed")
+        await pg.locator(f'[data-ba="toggle"][data-bid="{sid}"] .type-badge').first.click(); ok(await pg.evaluate(f"blockOrder.find(b=>b.id==='{sid}').collapsed")!=c0,'T2 見出しクリックで折りたたみ')
+        await pg.locator(f'[data-ba="del"][data-bid="{last}"]').click(); ok(await pg.evaluate('blockOrder.length')==n0,'T2 分割ブロックを削除')
+        # T3 入力→プレビュー
+        await pg.fill('#title','テスト卓A'); await pg.wait_for_timeout(400); ok('テスト卓A' in await pg.inner_text('#pvThreadTitle'),'T3 タイトルがプレビューに反映')
+        await pg.evaluate("document.getElementById('summaryItemsContainer')&&0")
+        if await pg.evaluate(f"blockOrder.find(b=>b.id==='{sid}').collapsed"): await pg.locator(f'[data-ba="toggle"][data-bid="{sid}"] .type-badge').first.click()
+        first=pg.locator(f'[data-bi="item-val"][data-bid="{sid}"]').first
+        if await first.count(): await first.fill('COC7版'); await pg.wait_for_timeout(400); ok('COC7版' in await pg.inner_text('#pvContent'),'T3 概要項目の入力がプレビューに反映')
+        # T4 入力内容のみクリア
+        order=await pg.evaluate('blockOrder.map(b=>b.id).join()')
+        await pg.locator('button[data-on-click="resetInputs"]').click(); await click_btn(pg,'クリア')
+        await pg.wait_for_timeout(300)
+        ok(await pg.input_value('#title')=='' and await pg.evaluate('blockOrder.map(b=>b.id).join()')==order,'T4 入力内容のみクリア：本文は消え、ブロックの並びは残る')
+        # T10 固定ヘッダー
+        await pg.evaluate("document.getElementById('mainArea').scrollTop=900"); await pg.wait_for_timeout(250)
+        ok(await pg.evaluate("document.getElementById('mainArea').scrollTop")>0 and await pg.evaluate("Math.round(document.querySelector('.app-header').getBoundingClientRect().top-document.getElementById('mainArea').getBoundingClientRect().top)")==0,'T10 メイン領域をスクロールしても、上部のバー（ログイン等）が固定されている')
+        await pg.context.close()
+        # T5/T6 投稿
+        pg=await newpage(b,None); await seed_channel(pg)
+        base=await pg.evaluate('appState.scenarios.length')   # 初期状態にはサンプルのシナリオが1件ある
+        await pg.locator('#channelCheckboxContainer .chip').first.click()
+        await pg.locator('#tagContainer .chip').first.click()   # フォーラムのタグ（必須）を選ぶ
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()"); await pg.fill('#intro','本文テスト')
+        await pg.fill('#title','シナリオ壱'); await pg.locator('#submitBtn').click()
+        await pg.wait_for_selector('text=投稿が完了しました',timeout=8000); ok(True,'T5 投稿成功のポップアップが出る')
+        posts=[r for r in pg.reqs if r[0]=='POST']; ok(posts and 'シナリオ壱' in posts[0][2],'T5 Webhookへスレッド名つきでPOST',posts[:1])
+        ok(await pg.evaluate('document.getElementById("statusMsg").style.display')in('','none'),'T5 画面下のバーは表示されない')
+        await click_btn(pg,'閉じる'); n=await pg.evaluate('appState.scenarios.length'); ok(n==base+1,'T5 投稿後にシナリオがDBへ保存される',n)
+        await pg.fill('#title','全く別のシナリオ'); await pg.locator('#submitBtn').click()
+        await pg.wait_for_selector('text=投稿が完了しました',timeout=8000); await click_btn(pg,'閉じる')
+        ok(await pg.evaluate('appState.scenarios.length')==base+2,'T6 連続投稿でもタイトルが違えば別DB（上書きしない）',await pg.evaluate('appState.scenarios.map(s=>s.title)'))
+        await pg.fill('#title','全く別のシナリオ 後編'); await pg.locator('#submitBtn').click()
+        await pg.wait_for_selector('text=投稿が完了しました',timeout=8000); await click_btn(pg,'閉じる')
+        ok(await pg.evaluate('appState.scenarios.length')==base+3,'T6 部分一致でも確認なしで別DBとして保存',await pg.evaluate('appState.scenarios.map(s=>s.title)'))
+        await pg.fill('#title','全く別のシナリオ 後編'); await pg.locator('#submitBtn').click(); await pg.wait_for_timeout(600)
+        ok(await pg.locator('text=重複').count()>0 or await pg.locator('#duplicateWarning:visible').count()>0,'T6 完全一致＋同じチャンネルは重複投稿の警告が出る')
+        ok(not pg.errs,'T5/T6 実行中にスクリプトエラーがない',pg.errs[:2]); await pg.context.close()
+        # T7 画像のドラッグ＆ドロップ
+        pg=await newpage(b,None)
+        await pg.locator('button[data-on-click="addImageBlock"]').click()
+        r=await pg.evaluate("""async()=>{const c=document.createElement('canvas');c.width=40;c.height=40;c.getContext('2d').fillRect(0,0,40,40);
+          const blob=await new Promise(r=>c.toBlob(r,'image/png'));const f=new File([blob],'a.png',{type:'image/png'});const dt=new DataTransfer();dt.items.add(f);
+          const before=blockOrder.length; const zone=[...document.querySelectorAll('[data-ba="pick"]')].pop();
+          zone.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));
+          await new Promise(r=>setTimeout(r,1200));
+          return {before,after:blockOrder.length,withImg:blockOrder.filter(b=>b.type==='image'&&b.previewUrl).length};}""")
+        ok(r['withImg']==1 and r['after']==r['before'],'T7 画像ブロックへのドロップは1回だけ反映（2重にならない）',r); await pg.context.close()
+        # T8 お気に入り
+        pg=await newpage(b,None)
+        await pg.evaluate("""()=>{appState.scenarios=[{id:'a',title:'A'},{id:'b',title:'B',favorite:true},{id:'c',title:'C'}];populateScenarioDBSelect();}""")
+        o=await pg.evaluate("[...document.querySelectorAll('#dbScenarioSelect option')].map(o=>o.value).join('')+'|'+[...document.querySelectorAll('#dbScenarioSelect optgroup')].map(g=>g.label).join('/')")
+        ok(o.startswith('bac') or o.startswith('b')and'ac'in o.split('|')[0],'T8 プルダウンはお気に入りが先頭',o)
+        await pg.context.close()
+        # T9 設定
+        pg=await newpage(b,None); await go(pg,'settingsTab')
+        await pg.fill('#maxAttachMB','20'); ok(await pg.evaluate('appState.maxAttachMB')==20,'T9 添付上限の設定が保存される')
+        await pg.locator('button',has_text='チャンネル').first.click() if False else None
+        ok(not pg.errs,'T9 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T11 DBタブ：手動追加・お気に入り・編集・呼び出し・削除
+        pg=await newpage(b,None); base=await pg.evaluate('appState.scenarios.length')
+        await go(pg,'databaseTab')
+        await pg.locator('button[data-on-click="openAddScenarioModal"]').click(); await pg.fill('#mTitle','DBテスト卓'); await pg.fill('#mSystem','CoC')
+        await pg.locator('#addScenarioModal button[type="submit"]').click(); await pg.wait_for_timeout(500)
+        ok(await pg.evaluate('appState.scenarios.length')==base+1,'T11 シナリオを手動で追加できる')
+        card=pg.locator('#dbCardContainer > *',has_text='DBテスト卓').first
+        ok(await card.count()>0,'T11 追加したシナリオがDB一覧に表示される')
+        await card.locator('[data-act="fav"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate("appState.scenarios.find(s=>s.title==='DBテスト卓').favorite===true"),'T11 ★でお気に入りにできる')
+        first=await pg.evaluate("[...document.querySelectorAll('#dbScenarioSelect option')][1].text")
+        ok('DBテスト卓' in first and first.startswith('★'),'T11 お気に入りにするとプルダウンの先頭に出る（再読み込み不要）',first)
+        await pg.locator('#dbCardContainer > *',has_text='DBテスト卓').first.locator('[data-act="edit"]').click(); await pg.wait_for_timeout(500)
+        await pg.fill('#title','DBテスト卓改'); await pg.locator('#swSave').click(); await pg.wait_for_timeout(700)
+        ok(await pg.evaluate("appState.scenarios.some(s=>s.title==='DBテスト卓改')"),'T11 編集（シナリオウィンドウ）でタイトルを変更して保存できる')
+        await go(pg,'postTab')
+        await pg.evaluate("activeTagNames.add('前のシナリオのタグ')")
+        sid2=await pg.evaluate("appState.scenarios.find(s=>s.title==='DBテスト卓改').id"); await pg.select_option('#dbScenarioSelect',sid2); await pg.wait_for_timeout(500)
+        ok(await pg.input_value('#title')=='DBテスト卓改' and await pg.evaluate('activeTagNames.size')==0,'T11 プルダウンから呼び出すと入力欄に反映され、前のタグは持ち越さない')
+        await go(pg,'databaseTab')
+        await pg.locator('#dbCardContainer > *',has_text='DBテスト卓改').first.locator('[data-act="del"]').click(); await pg.wait_for_timeout(300)
+        await click_btn(pg,'削除'); await pg.wait_for_timeout(400)
+        ok(await pg.evaluate('appState.scenarios.length')==base,'T11 削除できる（確認ダイアログ付き）'); ok(not pg.errs,'T11 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T12 設定タブ：チャンネルとタグ
+        pg=await newpage(b,None); await go(pg,'settingsTab')
+        c0=await pg.evaluate('appState.channels.length'); await pg.locator('button[data-on-click="addChannelConfig"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate('appState.channels.length')==c0+1,'T12 チャンネルを追加できる')
+        await pg.locator('[data-on-input="ch-rename"]').last.fill('新チャンネル'); await pg.locator('[data-on-input="ch-webhook"]').last.fill('https://discord.com/api/webhooks/1/abc')
+        ok(await pg.evaluate("appState.channels.at(-1).name==='新チャンネル'&&appState.channels.at(-1).webhookUrl.endsWith('/abc')"),'T12 名前とWebhook URLの入力が状態に反映')
+        await pg.locator('button[data-on-click="tag-add"]').last.click(); await pg.wait_for_timeout(200)
+        await pg.locator('[data-on-input="tag-name"]').last.fill('募集'); await pg.locator('[data-on-input="tag-id"]').last.fill('123456789012345678')
+        ok(await pg.evaluate("(()=>{const t=appState.channels.at(-1).tags.at(-1);return t.name==='募集'&&t.id==='123456789012345678'})()"),'T12 タグの追加と入力')
+        await pg.locator('button[data-on-click="ch-test"]').last.click(); await pg.wait_for_timeout(600)
+        ok(any(r[0]=='GET' for r in pg.reqs),'T12 接続テストがWebhookへGETする（タイムアウトつきの共通処理経由）')
+        await pg.locator('button[data-on-click="ch-del"]').last.click(); await pg.wait_for_timeout(300)
+        if await pg.locator('button',has_text='削除').count(): await click_btn(pg,'削除'); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate('appState.channels.length')==c0,'T12 チャンネルを削除できる'); ok(not pg.errs,'T12 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T13 バックアップの書き出しと取り込み
+        pg=await newpage(b,None); await pg.evaluate("appState.scenarios.push({id:'bk1',title:'バックアップ確認',tags:[],postedChannels:[],postedInfo:{}});saveState()"); await pg.wait_for_timeout(700)
+        await go(pg,'settingsTab')
+        async with pg.expect_download() as dl: await pg.locator('button[data-on-click="exportData"]').click()
+        path='/tmp/e2e/backup_test.json'; await (await dl.value).save_as(path); data=json.load(open(path,encoding='utf-8'))
+        ok(isinstance(data.get('scenarios'),list) and any(s.get('title')=='バックアップ確認' for s in data['scenarios']),'T13 バックアップ(JSON)を書き出せる')
+        await pg.context.close()
+        pg=await newpage(b,None); await go(pg,'settingsTab')
+        await pg.set_input_files('#importFile',path); await pg.wait_for_timeout(500)
+        for name in ['置き換え','取り込','上書き']:
+            if await pg.locator('button:visible',has_text=name).count(): await pg.locator('button:visible',has_text=name).last.click(); break
+        await pg.wait_for_timeout(2500)
+        ok(await pg.evaluate("appState.scenarios.some(s=>s.title==='バックアップ確認')"),'T13 書き出したバックアップを取り込める（復元後の再読み込みまで）'); await pg.context.close()
+        # T14 履歴・T15 自動分割・T16 フォーム初期化
+        pg=await newpage(b,None); await seed_channel(pg)
+        await pg.locator('#channelCheckboxContainer .chip').first.click(); await pg.locator('#tagContainer .chip').first.click()
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()"); await pg.fill('#intro','本文'); await pg.fill('#title','履歴確認')
+        await pg.locator('#submitBtn').click(); await pg.wait_for_selector('text=投稿が完了しました',timeout=8000); await click_btn(pg,'閉じる')
+        await go(pg,'historyTab')
+        ok(await pg.locator('#historyTableBody tr',has_text='履歴確認').count()>=1,'T14 投稿が履歴に残る')
+        await pg.locator('button[data-on-click="clearHistory"]').click(); await pg.wait_for_timeout(300)
+        for name in ['消去','削除']:
+            if await pg.locator('button:visible',has_text=name).count(): await pg.locator('button:visible',has_text=name).last.click(); break
+        await pg.wait_for_timeout(300); ok(await pg.evaluate('appState.history.length')==0,'T14 履歴を全消去できる')
+        await go(pg,'postTab')
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').val='あ'.repeat(1500);blockOrder.find(b=>b.id==='notes').val='い'.repeat(1500);renderBlockUI();renderPreview()")
+        await pg.locator('button[data-on-click="autoSplitBlocks"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate("blockOrder.some(b=>b.type==='split')"),'T15 2000文字を超える内容に、自動で分割ポイントが入る')
+        await pg.fill('#title','初期化確認'); await pg.locator('button[data-on-click="resetForm"]').click(); await pg.wait_for_timeout(300)
+        for name in ['クリア']:   # ダイアログの実行ボタン（最後に追加された要素を押す）
+            if await pg.locator('button:visible',has_text=name).count(): await pg.locator('button:visible',has_text=name).last.click(); break
+        await pg.wait_for_timeout(400); ok(await pg.input_value('#title')=='' ,'T16 フォーム初期化でタイトルが空に戻る')
+        ok(not pg.errs,'T14-16 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T17 秘匿HO：サブタブ・項目ブロック・見出し行・DM風プレビュー・保存と呼び出し
+        import base64,tempfile
+        png=tempfile.NamedTemporaryFile(suffix='.png',delete=False); png.write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==')); png.close()
+        pg=await newpage(b,None)
+        ok(await pg.locator('.ho-tab').count()==2 and 'フォーラム公開情報' in await pg.locator('.ho-tab').first.inner_text(),'T17 サブタブは [🌐公開情報]（既定）と [＋HO追加] の2つから始まる')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('.ho-tab').count()==3 and await pg.locator('.ho-tab.active').inner_text()=='🔒 HO1','T17 ＋HO追加で [🔒 HO1] が増えて開く')
+        ok(await pg.locator('#hoPanel [data-ho-in="key"]').count()==1 and await pg.locator('#hoPanel [data-ho-in="text"]').count()==1,'T17 追加直後は項目ブロック（項目名＋本文）が1つ')
+        ok(not await pg.locator('#postForm').is_visible() and await pg.locator('#hoPreviewBox').is_visible() and not await pg.locator('#pubPreviewBox').is_visible(),'T17 HOタブ中は入力欄・プレビューがHO用に切り替わる')
+        await pg.locator('#hoPanel [data-ho-in="name"]').fill('HO2'); ok(await pg.locator('.ho-tab.active').inner_text()=='🔒 HO2','T17 HO名がタブ名にすぐ反映される')
+        await pg.locator('#hoPanel [data-ho-in="key"]').fill('PC 作成'); await pg.locator('#hoPanel [data-ho-in="text"]').fill('年齢：10 代後半～20 代前半推奨')
+        await pg.locator('[data-ho-act="add-item"]').click(); await pg.locator('[data-ho-act="add-image"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('#hoPanel [data-ho-in="key"]').nth(1).fill('NPC 情報')
+        await pg.locator('[data-ho-act="sub-add"]').nth(1).click(); await pg.wait_for_timeout(200)
+        await pg.locator('#hoPanel [data-ho-in="sub-title"]').fill('雨月（うげつ）'); await pg.locator('#hoPanel [data-ho-in="sub-text"]').fill('あなたの血の繋がった兄。\n優しい性格。')
+        await pg.locator('#hoPanel [data-ho-in="file"]').set_input_files(png.name); await pg.wait_for_timeout(800)
+        await pg.locator('#hoPanel [data-ho-in="tagline"]').fill('あなたは急遽、鬼狩部隊に入隊した。'); await pg.wait_for_timeout(300)
+        msgs=await pg.evaluate('hoMessages(secretHOs[0]).map(m=>m.kind==="text"?m.text:"[image]")')
+        ok(msgs[0]=='# HO2：__あなたは急遽、鬼狩部隊に入隊した。__\n\n\n## ❚ PC 作成\n> 年齢：10 代後半～20 代前半推奨\n\n\n## ❚ NPC 情報\n雨月（うげつ）\n> あなたの血の繋がった兄。\n> 優しい性格。' and msgs[1]=='[image]' and len(msgs)==2,'T17 連続する項目ブロックは1つのメッセージにまとまり（見出しは先頭）、画像で区切られる',msgs)
+        ok('\n雨月（うげつ）\n> あなたの血の繋がった兄。' in msgs[0],'T17 サブ項目のタイトルは引用の外、本文は引用')
+        ok(await pg.locator('#hoPreviewBox [data-ho-copy="text"]').count()==1 and await pg.locator('#hoPreviewBox [data-ho-copy="img"]').count()==1 and await pg.locator('#hoPreviewBox [data-ho-copy="dl"]').count()==1 and await pg.locator('#hoPreviewBox [data-ho-copy="all"]').count()==0,'T17 コピーボタンは画像で区切られた単位ごと（項目ごとには出ない）')
+        ok(await pg.locator('#hoPanel [data-ho-copy]').count()==0,'T17 入力欄側にはコピーボタンがない')
+        await pg.locator('#hoPreviewBox [data-ho-copy="text"]').first.click(); await pg.wait_for_timeout(300)
+        ok('コピー' in (await pg.inner_text('#toast-box')),'T17 テキストのコピーボタンが動く')
+        await pg.locator('#hoPanel [data-ho-in="sub-style"]').select_option('bold'); await pg.wait_for_timeout(200)
+        ok('**雨月（うげつ）**' in (await pg.evaluate('hoMessages(secretHOs[0])[0].text')),'T17 サブタイトルを太字に切り替えられる')
+        await pg.locator('#hoPanel [data-ho-in="tagline"]').fill(''); await pg.wait_for_timeout(200)
+        ok((await pg.evaluate('hoMessages(secretHOs[0])[0].text')).startswith('## ❚ PC 作成'),'T17 導入文が空なら見出し行は出力されない')
+        await pg.locator('#hoPanel [data-ho-in="tagline"]').fill('導入'); await pg.locator('[data-ho-act="down"]').first.click()
+        ok(await pg.evaluate('secretHOs[0].blocks[1].keyName')=='PC 作成','T17 ブロックを▼で並び替えできる')
+        await pg.locator('[data-ho-act="tab"][data-hi="-1"]').click(); await pg.fill('#title','HO付きシナリオ'); await pg.locator('button[data-on-click="saveCurrentToDB"]').click(); await pg.wait_for_timeout(500)
+        ok(await pg.evaluate("(appState.scenarios.find(s=>s.title==='HO付きシナリオ')||{}).secretHOs?.[0]?.blocks.length")==3 and await pg.locator('#postForm').is_visible(),'T17 シナリオ保存で secretHOs が保存され、公開情報タブへ戻れる')
+        await pg.locator('button[data-on-click="resetInputs"]').click(); await click_btn(pg,'クリア'); await pg.wait_for_timeout(300)
+        ok(await pg.locator('.ho-tab').count()==2,'T17 入力内容のみクリアでHOタブも空になる')
+        sid=await pg.evaluate("appState.scenarios.find(s=>s.title==='HO付きシナリオ').id"); await pg.select_option('#dbScenarioSelect',sid); await pg.wait_for_timeout(500)
+        ok(await pg.locator('.ho-tab').count()==3 and 'HO2' in await pg.locator('.ho-tab').nth(1).inner_text() and await pg.evaluate('secretHOs[0].tagline')=='導入','T17 シナリオを呼び出すとHOタブ（導入文つき）が復元される')
+        await pg.locator('.ho-tab').nth(1).click(); await pg.locator('[data-ho-act="del-ho"]').click(); await click_btn(pg,'削除'); await pg.wait_for_timeout(300)
+        ok(await pg.locator('.ho-tab').count()==2,'T17 HOを削除できる'); ok(not pg.errs,'T17 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T18 公開情報のサブ項目
+        pg=await newpage(b,None)
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()"); await pg.fill('#intro','概要の本文')
+        ok(await pg.locator('[data-ba="sub-add"][data-bid="intro"]').count()==1 and await pg.locator('[data-bi="sub-title"]').count()==0,'T18 通常は従来どおり。「＋ サブ項目を追加」ボタンだけがある')
+        before=await pg.evaluate("buildPostData()[0].text")
+        await pg.locator('[data-ba="sub-add"][data-bid="intro"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('[data-bi="sub-title"]').first.fill('NPC田中'); await pg.locator('[data-bi="sub-text"]').first.fill('年齢: 40\n職業: 医師'); await pg.wait_for_timeout(300)
+        lines=(await pg.evaluate("buildPostData()[0].text")).split('\n')
+        ok('NPC田中' in lines and '> 年齢: 40' in lines and '> 概要の本文' in lines,'T18 サブタイトルは引用の外（通常文字）、本文は引用で出力される',lines)
+        await pg.locator('[data-bi="sub-style"]').first.select_option('bold'); await pg.wait_for_timeout(200)
+        ok('**NPC田中**' in (await pg.evaluate("buildPostData()[0].text")).split('\n'),'T18 サブタイトルを太字に切り替えられる')
+        ok('NPC田中' in await pg.inner_text('#pvContent'),'T18 プレビューにサブ項目が反映される')
+        ok('**' not in before and '> 概要の本文' in before,'T18 サブ項目が無いブロックの出力は従来どおり')
+        await pg.fill('#title','サブ項目シナリオ'); await pg.locator('button[data-on-click="saveCurrentToDB"]').click(); await pg.wait_for_timeout(500)
+        ok(await pg.evaluate("appState.scenarios.find(s=>s.title==='サブ項目シナリオ').fullBlockData.find(b=>b.id==='intro').subItems[0].style")=='bold','T18 サブ項目（表記つき）がシナリオDBに保存される')
+        await pg.locator('[data-ba="sub-del"]').first.click(); await pg.wait_for_timeout(200)
+        ok(await pg.evaluate("blockOrder.find(b=>b.id==='intro').subItems.length")==0 and '**' not in await pg.evaluate("buildPostData()[0].text"),'T18 サブ項目を削除できる')
+        ok(not pg.errs,'T18 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T19 HOタブの並べ替え・投稿分割・公開情報と同じブロック操作
+        png2=tempfile.NamedTemporaryFile(suffix='.png',delete=False); png2.write(open(png.name,'rb').read()); png2.close()
+        pg=await newpage(b,None)
+        for n in ['A','B','C']:
+            await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('#hoPanel [data-ho-in="name"]').fill('HO'+n)
+        names=lambda: pg.evaluate('secretHOs.map(h=>h.name).join()')
+        await pg.locator('[data-ho-act="tab-left"]').click(); await pg.wait_for_timeout(200)
+        ok(await names()=='HOA,HOC,HOB' and 'HOC' in await pg.locator('.ho-tab.active').inner_text(),'T19 [◀ 左へ]でHOタブを並べ替えられる（開いているHOはそのまま）',await names())
+        await pg.locator('[data-ho-act="tab-right"]').click(); await pg.wait_for_timeout(200)
+        ok(await names()=='HOA,HOB,HOC','T19 [右へ ▶]で戻せる')
+        await pg.locator('.ho-tab[data-hdrag="0"]').drag_to(pg.locator('.ho-tab[data-hdrag="2"]')); await pg.wait_for_timeout(300)
+        ok(await names()=='HOB,HOC,HOA','T19 タブをドラッグ＆ドロップで並べ替えられる',await names())
+        # 投稿分割・コピー単位
+        await pg.locator('.ho-tab[data-hdrag="0"]').click()
+        await pg.locator('#hoPanel [data-ho-in="key"]').fill('甲'); await pg.locator('#hoPanel [data-ho-in="text"]').fill('こう')
+        await pg.locator('[data-ho-act="add-item"]').click(); await pg.locator('#hoPanel [data-ho-in="key"]').nth(1).fill('乙'); await pg.locator('#hoPanel [data-ho-in="text"]').nth(1).fill('おつ')
+        ok(await pg.locator('#hoPreviewBox [data-ho-copy="text"]').count()==1,'T19 連続する項目ブロックのプレビューにはコピーボタンが1つだけ')
+        await pg.locator('[data-ho-act="add-split"]').click(); await pg.locator('[data-ho-act="add-item"]').click()
+        await pg.locator('#hoPanel [data-ho-in="key"]').nth(2).fill('丙'); await pg.locator('#hoPanel [data-ho-in="text"]').nth(2).fill('へい'); await pg.wait_for_timeout(200)
+        ok(await pg.locator('#hoPreviewBox [data-ho-copy="text"]').count()==2 and await pg.locator('#hoPreviewBox [data-ho-copy="all"]').count()==1 and await pg.locator('#hoPreviewBox .ho-splitline').count()==1,'T19 投稿分割があると、そこで区切ってコピーボタンが入る（まとめてコピーも出る）')
+        # 画像：ファイル選択（複数）とドラッグ＆ドロップ
+        await pg.locator('[data-ho-act="add-image"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('#hoPanel [data-ho-in="file"]').set_input_files([png.name,png2.name]); await pg.wait_for_timeout(900)
+        nimg=await pg.evaluate("secretHOs[0].blocks.filter(b=>b.type==='image'&&b.previewUrl).length"); ok(nimg==2,'T19 画像を複数選択でき、足りない分は新しいブロックになる',nimg)
+        await pg.locator('[data-ho-act="add-image"]').click(); await pg.wait_for_timeout(200)   # 空の画像ブロックへドロップ
+        r=await pg.evaluate("""async()=>{const c=document.createElement('canvas');c.width=30;c.height=30;c.getContext('2d').fillRect(0,0,30,30);const blob=await new Promise(r=>c.toBlob(r,'image/png'));
+          const dt=new DataTransfer();dt.items.add(new File([blob],'d.png',{type:'image/png'}));const z=[...document.querySelectorAll('#hoPanel .drop-zone')].pop();const before=secretHOs[0].blocks.length;
+          z.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));await new Promise(r=>setTimeout(r,1200));
+          return {before,after:secretHOs[0].blocks.length,withImg:secretHOs[0].blocks.filter(b=>b.type==='image'&&b.previewUrl).length};}""")
+        ok(r['withImg']==3 and r['after']==r['before'],'T19 画像のドラッグ＆ドロップは1回だけ反映される（2重にならない）',r)
+        # ブロックのドラッグ並べ替え・折りたたみ・書式ボタン・自動分割
+        await pg.locator('#hoPanel [data-ho-act="toggle"] .type-badge').first.click(); await pg.wait_for_timeout(200)
+        ok(await pg.evaluate('secretHOs[0].blocks.some(b=>b.collapsed===true)'),'T19 見出しクリックで折りたたみ')
+        await pg.locator('[data-ho-act="expand-all"]').click()
+        ta=pg.locator('#hoPanel [data-ho-in="text"]').first; await ta.fill('abc'); await ta.select_text(); await pg.locator('#hoPanel [data-ho-act="fmt"]').first.click(); await pg.wait_for_timeout(200)
+        ok('**abc**' in await ta.input_value(),'T19 書式ボタン（太字）が効く')
+        await pg.evaluate("secretHOs[0].blocks.filter(b=>b.type==='item').slice(0,2).forEach((b,i)=>b.val=('あ'.repeat(1500)));renderHoPanel();renderHoPreview()")
+        await pg.locator('[data-ho-act="auto-split"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate("secretHOs[0].blocks.filter(b=>b.type==='split').length")>=2,'T19 2000文字を超える内容に、自動で分割ポイントが入る')
+        ok(not pg.errs,'T19 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T19b 項目ブロックのドラッグ＆ドロップ並べ替え（短いブロック3つで確認）
+        pg=await newpage(b,None); await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('[data-ho-act="add-item"]').click(); await pg.locator('[data-ho-act="add-item"]').click()
+        await pg.evaluate("secretHOs[0].blocks.forEach((b,i)=>b.keyName='K'+i);renderHoPanel()")
+        src_=pg.locator('#hoPanel [data-hb] .ho-handle').first; tgt=pg.locator('#hoPanel [data-hb]').nth(1); await src_.scroll_into_view_if_needed(); await tgt.scroll_into_view_if_needed(); await pg.wait_for_timeout(200); hh=(await tgt.bounding_box())['height']
+        await src_.scroll_into_view_if_needed(); await src_.drag_to(tgt,target_position={'x':60,'y':max(hh-4,2)}); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate("secretHOs[0].blocks.map(b=>b.keyName).join()")=='K1,K0,K2','T19 項目ブロックをドラッグ＆ドロップで並べ替えられる（公開情報と同じ操作）',await pg.evaluate("secretHOs[0].blocks.map(b=>b.keyName).join()"))
+        ok(not pg.errs,'T19b エラーなし',pg.errs[:2]); await pg.context.close()
+        # T20 入力欄のフォント・プレビュー拡大・HOの画像案内とドラッグ枠
+        pg=await newpage(b,None)
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()")
+        f=await pg.evaluate("[getComputedStyle(document.querySelector('#intro')).fontFamily,getComputedStyle(document.querySelector('#title')).fontFamily,getComputedStyle(document.querySelector('#pvContent')).fontFamily]")
+        ok(f[0]==f[2] and f[1]==f[2],'T20 入力欄・テキストエリアのフォントがプレビューと同じ（「~」の高さがそろう）',f)
+        await pg.fill('#intro','期間：1日~3日'); await pg.wait_for_timeout(300)
+        await pg.locator('#previewZoomBtn').click(); await pg.wait_for_timeout(300)
+        bx=await pg.locator('.preview-area.zoomed').bounding_box()
+        ok(bx and bx['width']>1100 and bx['height']>800 and '閉じる' in await pg.inner_text('#previewZoomBtn'),'T20 プレビューを拡大表示できる（画面いっぱい）',bx)
+        ok('1日~3日' in await pg.inner_text('#pvContent'),'T20 拡大表示でも内容が表示されている')
+        await pg.keyboard.press('Escape'); await pg.wait_for_timeout(200)
+        ok(await pg.locator('.preview-area.zoomed').count()==0 and '拡大表示' in await pg.inner_text('#previewZoomBtn'),'T20 Escで拡大を閉じられる')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('[data-ho-act="add-image"]').click(); await pg.wait_for_timeout(200)
+        ok('ドラッグ＆ドロップ' in await pg.inner_text('#hoPanel .ho-imghint') and '画像を追加' in await pg.inner_text('#hoPanel .ho-imghint'),'T20 HOに「画像を追加できる」案内文がある')
+        await pg.locator('#previewZoomBtn').click(); await pg.wait_for_timeout(200)
+        ok(await pg.locator('.preview-area.zoomed #hoPreviewBox').is_visible(),'T20 HOのDMプレビューも拡大表示できる'); await pg.keyboard.press('Escape')
+        r=await pg.evaluate("""()=>{const mk=()=>{const dt=new DataTransfer();dt.items.add(new File(['x'],'a.png',{type:'image/png'}));return dt;};
+          const z=[...document.querySelectorAll('#hoPanel .drop-zone')].pop(), pn=document.getElementById('hoPanel');
+          z.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:mk()}));
+          const over={panel:pn.classList.contains('ho-filedrag'),zone:z.classList.contains('dragover'),label:getComputedStyle(pn,'::after').content};
+          z.dispatchEvent(new DragEvent('dragleave',{bubbles:true,cancelable:true,relatedTarget:document.body}));
+          return {over,after:pn.classList.contains('ho-filedrag')};}""")
+        ok(r['over']['panel'] and r['over']['zone'] and 'ドロップ' in r['over']['label'] and not r['after'],'T20 画像をドラッグ中はHOの入力欄と画像枠に枠・案内が出て、離れると消える',r)
+        ok(not pg.errs,'T20 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T21 ブロックIDの安全化・HOの下書き（画像は参照）・狭い画面のヘッダー
+        pg=await newpage(b,None)
+        r=await pg.evaluate("""()=>{secretHOs=sanitizeHOs([{name:'x',tagline:'',blocks:[{id:'a" data-x="1" onmouseover="window.__pwn=1" q="',type:'item',keyName:'k',val:'v'}]}]);activeHO=0;renderHoPanel();
+          const el=document.querySelector('#hoPanel [data-hb]');return {attrs:[...el.attributes].map(a=>a.name).join(','),pwn:window.__pwn===undefined}}""")
+        ok(r['attrs']=='class,data-hb' and r['pwn'],'T21 細工されたブロックIDでも、HTMLに余計な属性（onmouseover等）が入らない',r)
+        await pg.evaluate("setHOs([])"); await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('#hoPanel [data-ho-in="name"]').fill('HO復元')
+        await pg.locator('[data-ho-act="add-image"]').click(); await pg.locator('#hoPanel [data-ho-in="file"]').set_input_files(png.name); await pg.wait_for_timeout(1800)
+        raw=await pg.evaluate("window.idbGetRaw('draft')")
+        ok(raw and 'secretHOs' in raw and 'data:image' not in raw and '@img:' in raw,'T21 HOの下書きは公開情報の下書きに含まれ、画像は参照で保存される（画像データを丸ごと書き込まない）')
+        await pg.reload(); await pg.wait_for_timeout(2200)
+        ok(await pg.evaluate('secretHOs.length')==1 and await pg.evaluate('secretHOs[0].name')=='HO復元' and await pg.locator('.ho-tab').count()==3,'T21 再読み込み後も、作業中のHOが復元される')
+        ok(await pg.evaluate("secretHOs[0].blocks.some(b=>b.type==='image'&&b.previewUrl)"),'T21 HOの画像も復元される')
+        ok(not pg.errs,'T21 エラーなし',pg.errs[:2]); await pg.context.close()
+        ctx=await b.new_context(viewport={'width':390,'height':844}); pg=await ctx.new_page(); await pg.route('https://www.gstatic.com/**',lambda r:r.abort()); await pg.goto(URL); await pg.wait_for_timeout(1500)
+        hgt=await pg.evaluate("document.querySelector('.app-header').offsetHeight"); ow=await pg.evaluate("[document.documentElement.scrollWidth,innerWidth]")
+        ok(hgt<=95 and ow[0]==ow[1] and await pg.locator('#login-btn').is_visible(),'T21 幅390pxでも固定ヘッダーが小さい（高さ95px以下・横にはみ出さない・ログインボタンが見える）',[hgt,ow])
+        await ctx.close()
+        # T22 共通化した部品：公開情報側の書式ボタン・並べ替え・サブ項目のUIがHOと同じ構造
+        pg=await newpage(b,None)
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()")
+        ta=pg.locator('#intro'); await ta.fill('abc'); await ta.select_text(); await pg.locator('[data-ba="fmt"][data-bid="intro"]').first.click(); await pg.wait_for_timeout(200)
+        ok(await ta.input_value()=='**abc**' and await pg.evaluate("blockOrder.find(b=>b.id==='intro').val")=='**abc**','T22 公開情報の書式ボタン（太字）が効き、データにも反映される')
+        await ta.fill('a\nb'); await ta.select_text(); await pg.locator('[data-ba="fmt"][data-bid="intro"][data-fb="> "]').click(); await pg.wait_for_timeout(200)
+        ok(await ta.input_value()=='> a\n> b','T22 引用ボタンは選択した各行の先頭に付く')
+        await pg.locator('[data-ba="sub-add"][data-bid="intro"]').click(); await pg.wait_for_timeout(200)
+        skel=lambda sel: pg.evaluate("(s)=>{const el=document.querySelector(s);const f=n=>n.tagName.toLowerCase()+(n.className?'.'+n.className.split(' ').join('.'):'')+'['+[...n.children].map(f).join(',')+']';return f(el)}",sel)
+        pub=await skel('#sortableBlockContainer .sub-item')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('#hoPanel [data-ho-act="sub-add"]').click(); await pg.wait_for_timeout(200)
+        ho=await skel('#hoPanel .sub-item')
+        ok(pub==ho,'T22 サブ項目の編集UIは、公開情報とHOで同じ構造（共通の部品から作られている）',[pub,ho])
+        await pg.locator('#hoPanel [data-ho-in="sub-title"]').fill('甲'); await pg.locator('#hoPanel [data-ho-in="sub-style"]').select_option('bold')
+        ok(await pg.evaluate("secretHOs[0].blocks[0].subItems[0].title")=='甲' and await pg.evaluate("secretHOs[0].blocks[0].subItems[0].style")=='bold','T22 HO側のサブ項目の入力・表記の切り替えもデータに反映される')
+        ok(not pg.errs,'T22 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T23 壊れた保存データでも起動でき、読み込めないデータは退避される
+        BAD={'schemaVersion':'x','botName':5,'channels':[None,{'id':1,'name':{},'tags':7,'webhookUrl':9},{'id':'c2','name':'ok','webhookUrl':'https://discord.com/api/webhooks/1/a','tags':[None,{'name':1,'id':{}}]}],
+          'history':['x',{'date':5,'title':{},'channels':None},None],
+          'scenarios':[None,5,'str',{'id':1,'title':None,'fullBlockData':'x','secretHOs':'y','tags':'z','postedChannels':'q','postedInfo':7},
+            {'id':'ok','title':'T','fullBlockData':[{'type':'summary_container','items':'bad'},{'type':7},None,{'type':'textarea','subItems':[None,{'title':3}]}],
+             'secretHOs':[{'name':None,'blocks':[{'type':'item','subItems':'bad'},{'id':{},'type':'image','previewUrl':5},None,'x']},None,'bad'],'favorite':'yes'}]}
+        pg=await newpage(b,None); await pg.evaluate("(s)=>window.idbSetRaw('state',s)",json.dumps(BAD)); await pg.reload(); await pg.wait_for_timeout(2500)
+        ok(not pg.errs and await pg.locator('.tab-btn').count()==3,'T23 項目が壊れた保存データでも、エラーなく起動する',pg.errs[:2])
+        ok(await pg.evaluate("appState.scenarios.every(s=>s&&typeof s==='object')&&appState.channels.every(c=>c&&typeof c==='object')&&Array.isArray(appState.history)"),'T23 壊れた要素は取り除かれ、残りは安全な形に整えられる')
+        for t_ in ['databaseTab','historyTab','settingsTab','postTab']:
+            await go(pg,t_)
+        opts=await pg.evaluate("[...document.querySelectorAll('#dbScenarioSelect option')].map(o=>o.text).join('|')")
+        ok(any(o.startswith('T (') or o.startswith('★ T (') for o in opts.split('|')),'T23 壊れたデータの中の正常なシナリオはプルダウンに出る',opts)
+        sid3=await pg.evaluate("appState.scenarios.find(s=>s.id==='ok').id"); await pg.select_option('#dbScenarioSelect',sid3); await pg.wait_for_timeout(500)
+        ok(await pg.input_value('#title')=='T' and not pg.errs,'T23 壊れた項目を含むシナリオも呼び出せる',pg.errs[:2])
+        await go(pg,'databaseTab')
+        await pg.locator('#dbCardContainer [data-act="edit"]').first.click(); await pg.wait_for_timeout(300); ok(not pg.errs,'T23 編集モーダルも開ける',pg.errs[:2])
+        await pg.context.close()
+        raw='{"scenarios":[{"id":"x","title":"途中で切れたデータ'
+        pg=await newpage(b,None); await pg.evaluate("(s)=>window.idbSetRaw('state',s)",raw); await pg.reload(); await pg.wait_for_timeout(2600)
+        ok(await pg.evaluate("window.idbGetRaw('state_backup_corrupt')")==raw,'T23 読み込めない保存データは、元のまま退避される')
+        ok('保存データを読み込めませんでした' in await pg.inner_text('#toast-box') and await pg.locator('.tab-btn').count()==3 and not pg.errs,'T23 その旨をお知らせし、アプリは使える状態で起動する',pg.errs[:2])
+        await pg.context.close()
+        # T24 設定画面がすっきり・自分のフォーマット
+        import base64,tempfile
+        png3=tempfile.NamedTemporaryFile(suffix='.png',delete=False); png3.write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==')); png3.close()
+        pg=await newpage(b,None); await go(pg,'settingsTab')
+        hs=await pg.evaluate("[...document.querySelectorAll('#settingsTab > .card')].map(c=>Math.round(c.getBoundingClientRect().height))"); tot=await pg.evaluate("Math.round(document.getElementById('settingsTab').getBoundingClientRect().height)")
+        ok(hs[0]<=160 and tot<=1050,'T24 設定画面がすっきり（Bot・基本設定のカードは以前の220px→160px以下、全体は1319px→1050px以下）',[hs,tot])
+        ok(await pg.locator('#botName').is_visible() and await pg.locator('#maxAttachMB').is_visible() and await pg.locator('.bot-avatar').is_visible(),'T24 Bot表示名・添付上限・アイコンが1行に並ぶ')
+        await pg.locator('#botAvatarInput').set_input_files(png3.name); await pg.wait_for_timeout(900)
+        ok(await pg.locator('#botAvatarPreview').is_visible() and await pg.locator('#botAvatarClearBtn').is_visible(),'T24 アイコンを選ぶと丸いプレビューが出て、解除ボタンが現れる')
+        await pg.locator('#botAvatarClearBtn').click(); await pg.wait_for_timeout(300)
+        ok(not await pg.locator('#botAvatarPreview').is_visible() and not await pg.locator('#botAvatarClearBtn').is_visible(),'T24 アイコンを解除できる')
+        # フォーマットの追加・設定
+        await pg.locator('[data-fmt-act="add"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('[data-fmt-in="name"]').fill('キャラ紹介'); await pg.locator('[data-fmt-in="headPre"]').fill('### '); await pg.locator('[data-fmt-in="linePre"]').fill('- '); await pg.wait_for_timeout(500)
+        ok(await pg.locator('.fmt-sample').inner_text()=='### 項目名\n- サンプル本文1行目\n- サンプル本文2行目','T24 フォーマットを追加して設定すると、サンプル出力にすぐ反映される')
+        fid=await pg.evaluate('appState.formats[0].id')
+        await go(pg,'postTab'); await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()")
+        opt=await pg.evaluate("[...document.querySelectorAll('[data-bc=\"decor\"][data-bid=\"intro\"] option')].map(o=>o.text).join('|')")
+        ok('🎨 キャラ紹介' in opt,'T24 公開情報のブロックの装飾プルダウンに、自分のフォーマットが「🎨 名前」で出る',opt)
+        await pg.fill('#intro','a\nb'); await pg.locator('[data-bc="decor"][data-bid="intro"]').select_option(fid); await pg.wait_for_timeout(300)
+        txt=await pg.evaluate("buildPostData()[0].text")
+        ok('- a\n- b' in txt and '\n> a' not in txt,'T24 選ぶと、投稿テキストが自分のフォーマットで出力される',txt)
+        ok('- a' in await pg.inner_text('#pvContent'),'T24 プレビューにも反映される')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.wait_for_timeout(200)
+        ok('🎨 キャラ紹介' in await pg.evaluate("[...document.querySelectorAll('#hoPanel [data-ho-in=\"decor\"] option')].map(o=>o.text).join('|')"),'T24 HOの項目ブロックにも、自分のフォーマットが選べる')
+        await pg.locator('#hoPanel [data-ho-in="key"]').fill('甲'); await pg.locator('#hoPanel [data-ho-in="text"]').fill('x\ny'); await pg.locator('#hoPanel [data-ho-in="decor"]').select_option(fid); await pg.wait_for_timeout(200)
+        ok(await pg.evaluate('hoMessages(secretHOs[0])[0].text')=='### 甲\n- x\n- y','T24 HOのDM用テキストも自分のフォーマットで出る')
+        await pg.locator('[data-ho-act="tab"][data-hi="-1"]').click(); await go(pg,'settingsTab')
+        await pg.locator('[data-fmt-in="name"]').fill('キャラ紹介改'); await pg.wait_for_timeout(700)
+        await go(pg,'postTab')
+        ok('🎨 キャラ紹介改' in await pg.evaluate("[...document.querySelectorAll('[data-bc=\"decor\"][data-bid=\"intro\"] option')].map(o=>o.text).join('|')"),'T24 フォーマット名を変えると、プルダウンの表示名にも反映される')
+        await pg.wait_for_timeout(800); await pg.reload(); await pg.wait_for_timeout(2200)
+        ok(await pg.evaluate("appState.formats.length")==1 and await pg.evaluate("appState.formats[0].name")=='キャラ紹介改','T24 再読み込みしても、フォーマットが残っている')
+        await go(pg,'settingsTab')
+        async with pg.expect_download() as dl2: await pg.locator('button[data-on-click="exportData"]').click()
+        await (await dl2.value).save_as('/tmp/e2e/fmt_backup.json'); ok('formats' in json.load(open('/tmp/e2e/fmt_backup.json',encoding='utf-8')) and 'キャラ紹介改' in open('/tmp/e2e/fmt_backup.json',encoding='utf-8').read(),'T24 バックアップ(JSON)にもフォーマットが含まれる')
+        await pg.locator('[data-fmt-act="dup"]').click(); await pg.wait_for_timeout(200)
+        ok(await pg.evaluate('appState.formats.length')==2,'T24 フォーマットを複製できる')
+        await pg.locator('[data-fmt-act="del"]').last.click(); await pg.wait_for_timeout(200); await click_btn(pg,'削除'); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate('appState.formats.length')==1,'T24 フォーマットを削除できる（確認ダイアログ付き）')
+        await pg.locator('[data-fmt-act="del"]').first.click(); await pg.wait_for_timeout(200); await click_btn(pg,'削除'); await pg.wait_for_timeout(800)
+        await go(pg,'postTab')
+        txt=await pg.evaluate("buildPostData()[0].text")
+        ok('> a\n> b' in txt,'T24 使っていたフォーマットを削除すると、そのブロックは「通常」の表示に戻る',txt)
+        ok(not pg.errs,'T24 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T25 クラウドから統合されたデータ（細工された値）が、画面のHTMLに入らない
+        pg=await newpage(b,None)
+        r=await pg.evaluate("""async()=>{appState.formats=[{id:'fmt_keep',name:'残るべき',headPre:'## ',headPost:'',linePre:'> ',wrap:'none'}];
+          await applyMergedState({scenarios:[{id:'s1',title:'<img src=x onerror=window.__p1=1>',fullBlockData:'x',secretHOs:'y'}],channels:[{id:'c1',name:'<b>x</b>',webhookUrl:'u',tags:[{name:'<i>t</i>',id:'1'}]}],history:[{date:'d',title:'<u>h</u>',channels:'c'}],deletedScenarios:{},
+            formats:[{id:'fmt_x" onmouseover="window.__p2=1" q="',name:'<s>f</s>',headPre:5,headPost:null,linePre:undefined,wrap:'code'},{id:'bad',name:'z'}]});
+          const row=document.querySelector('#customFormatList [data-fid]');
+          return {ids:appState.formats.map(f=>f.id),attrs:row?[...row.attributes].map(a=>a.name).join(','):'none',p1:window.__p1,p2:window.__p2,t:appState.formats.map(f=>typeof f.headPre+typeof f.linePre).join()}}""")
+        ok(r['attrs']=='class,data-fid' and r['p2'] is None and r['p1'] is None,'T25 クラウド統合経由の細工されたフォーマットIDでも、HTMLに余計な属性が入らない',r)
+        ok(len(r['ids'])==1 and r['ids'][0].startswith('fmt_x') and r['t']=='stringstring','T25 不正なフォーマット（IDが不正・型違い）は取り除かれるか、安全な形に直される',r)
+        ok(await pg.evaluate("appState.scenarios[0].title")=='<img src=x onerror=window.__p1=1>' and await pg.evaluate("document.querySelector('#dbCardContainer')?.innerHTML.includes('<img src=x')")==False,'T25 統合されたシナリオ名などは、文字として表示される（HTMLとして解釈されない）')
+        r2=await pg.evaluate("""async()=>{appState.formats=[{id:'fmt_keep',name:'残るべき',headPre:'',headPost:'',linePre:'',wrap:'none'}];await applyMergedState({scenarios:[],channels:[],history:[],deletedScenarios:{}});return appState.formats.map(f=>f.id).join()}""")
+        ok(r2=='fmt_keep','T25 統合結果にフォーマットが含まれないとき、端末のフォーマットは消えない',r2)
+        ok(not pg.errs,'T25 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T26 左サイドバー：選択中の画面が分かる
+        pg=await newpage(b,None,home=True)
+        navs=['databaseTab','postTab','settingsTab']; names={'databaseTab':'ホーム','postTab':'Discord投稿・編集','settingsTab':'初期設定'}; good=True; info=[]
+        ok(await pg.evaluate("[...document.querySelectorAll('.sidebar .nav-tabs .tab-btn')].map(b=>b.dataset.tab).join()")==','.join(navs),'T26 サイドバーのメニューは、ホーム／Discord投稿・編集／初期設定の3つ（共通ギャラリーは廃止）')
+        for tb in navs:
+            await go(pg,tb); await pg.wait_for_timeout(450)
+            r=await pg.evaluate("""(tb)=>{const btns=[...document.querySelectorAll('.nav-tabs .tab-btn')],act=btns.filter(b=>b.classList.contains('active'));return {n:act.length,t:act[0]&&act[0].dataset.tab,sel:act.map(b=>b.getAttribute('aria-selected')).join(),bg:act[0]&&getComputedStyle(act[0]).backgroundColor,inactive:btns.filter(b=>!b.classList.contains('active')).map(b=>getComputedStyle(b).backgroundColor),page:document.getElementById('pageName').textContent,shown:document.getElementById(tb).classList.contains('active')}}""",tb)
+            info.append(r); good&=(r['n']==1 and r['t']==tb and r['sel']=='true' and r['shown'] and names[tb] in r['page'] and all(c in('rgba(0, 0, 0, 0)','transparent') for c in r['inactive']) and r['bg']=='rgb(79, 107, 237)')
+        ok(good,'T26 切り替えると、選んだメニューだけが色つきになり、ページ名と画面の中身も切り替わる',info[0] if not good else '')
+        ok(await pg.evaluate("document.querySelector('.sidebar').getBoundingClientRect().width")==270,'T26 サイドバーの幅は270px固定')
+        ok(await pg.evaluate("(()=>{const c=getComputedStyle(document.body).backgroundColor.match(/\\d+/g).map(Number);return (c[0]+c[1]+c[2])/3>220})()"),'T26 全体は、白や薄いグレーを基調にした明るいデザイン')
+        ok(not pg.errs,'T26 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T27 シナリオウィンドウ：プレビュー・同じウィンドウでの編集・作業中の内容の保護
+        pg=await newpage(b,None)
+        await pg.evaluate("blockOrder.find(b=>b.id==='intro').collapsed=false;renderBlockUI()"); await pg.fill('#title','HO付きの卓'); await pg.fill('#intro','公開の本文')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('#hoPanel [data-ho-in="name"]').fill('HO9'); await pg.locator('#hoPanel [data-ho-in="key"]').fill('秘密'); await pg.locator('#hoPanel [data-ho-in="text"]').fill('秘匿の本文')
+        await pg.locator('[data-ho-act="tab"][data-hi="-1"]').click(); await pg.locator('button[data-on-click="saveCurrentToDB"]').click(); await pg.wait_for_timeout(500)
+        await pg.fill('#title','メモ書き'); await pg.fill('#intro','作業中の本文'); await pg.wait_for_timeout(300)
+        await go(pg,'databaseTab')
+        card=pg.locator('#dbCardContainer > *',has_text='HO付きの卓').first; await card.locator('[data-act="edit"]').click(); await pg.wait_for_timeout(600); await pg.locator('#swModePreview').click(); await pg.wait_for_timeout(500)
+        bx=await pg.locator('#editScenarioModal .modal-card').bounding_box()
+        ok(await pg.locator('#editScenarioModal').is_visible() and 600<=bx['width']<=681,'T27 シナリオを選ぶと、従来の編集画面と同じ大きさのウィンドウが開く',bx)
+        ok(await pg.locator('#swBody .preview-area').is_visible() and '公開の本文' in await pg.inner_text('#swBody #pvContent') and 'HO付きの卓' in await pg.inner_text('#swBody #pvThreadTitle'),'T27 公開情報のプレビューが表示される')
+        ok(await pg.locator('#swTabs .ho-tab').count()==3 and await pg.locator('#swTabs .ho-tab.add').count()==1 and not await pg.locator('#swTabs .ho-tab.add').is_visible(),'T27 HOのタブが並ぶ（プレビュー中は「＋HO追加」は出ない）')
+        await pg.locator('#swTabs .ho-tab').nth(1).click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('#swBody #hoPreviewBox').is_visible() and '秘匿の本文' in await pg.inner_text('#swBody #hoPreviewBox') and await pg.locator('#swBody [data-ho-copy="text"]').count()==1,'T27 HOのDM風プレビュー（コピーボタンつき）が表示される')
+        await pg.keyboard.press('Escape'); await pg.wait_for_timeout(400)
+        ok(not await pg.locator('#editScenarioModal').is_visible() and await pg.evaluate("document.querySelector('.preview-area').parentElement.className")=='workspace' and await pg.evaluate("document.getElementById('postForm').parentElement.className.includes('form-area')"),'T27 Escで閉じ、移していた部品は元の場所に戻る')
+        await go(pg,'postTab')
+        ok(await pg.input_value('#title')=='メモ書き' and await pg.input_value('#intro')=='作業中の本文' and await pg.locator('.ho-tab').count()==3 and await pg.evaluate('secretHOs[0].name')=='HO9','T27 開く前に作業中だった投稿内容は、そのまま残っている')
+        # 編集
+        await go(pg,'databaseTab')
+        await pg.locator('#dbCardContainer > *',has_text='HO付きの卓').first.locator('[data-act="edit"]').click(); await pg.wait_for_timeout(600)
+        ok(await pg.locator('#swBody #postForm').is_visible() and await pg.locator('#swBody #sortableBlockContainer').is_visible() and await pg.locator('#swSave').is_visible(),'T27 「編集」で、同じウィンドウ内に投稿作成ページと同じ編集画面（項目ブロック）が出る')
+        ok(not await pg.locator('#swBody #submitBtn').is_visible() and not await pg.locator('#swBody #channelCheckboxContainer').is_visible(),'T27 投稿専用の部分（投稿ボタン・投稿先）は出ない')
+        ok(await pg.locator('#swTabs .ho-tab.add').is_visible() and await pg.input_value('#title')=='HO付きの卓','T27 編集中は「＋HO追加」も使え、シナリオの内容が読み込まれている')
+        await pg.fill('#title','HO付きの卓・改'); await pg.fill('#intro','書き換えた本文')
+        await pg.locator('#swTabs .ho-tab').nth(1).click(); await pg.locator('#hoPanel [data-ho-in="text"]').first.fill('書き換えたHO'); await pg.locator('[data-ho-act="add-image"]').click()
+        await pg.locator('#swModePreview').click(); await pg.wait_for_timeout(400)
+        ok('HO' in await pg.inner_text('#swBody #hoPreviewBox') and '書き換えたHO' in await pg.inner_text('#swBody #hoPreviewBox'),'T27 編集中でも「プレビュー」に切り替えると、編集した内容が反映されて見える')
+        await pg.locator('#swModeEdit').click(); await pg.wait_for_timeout(300)
+        await pg.locator('#swSave').click(); await pg.wait_for_timeout(700)
+        sc=await pg.evaluate("(()=>{const s=appState.scenarios.find(x=>x.title==='HO付きの卓・改');return s&&{intro:s.fullBlockData.find(b=>b.id==='intro').val,ho:s.secretHOs[0].blocks[0].val,n:s.secretHOs[0].blocks.length,id:s.id}})()")
+        ok(sc and sc['intro']=='書き換えた本文' and sc['ho']=='書き換えたHO' and sc['n']==2 and not await pg.locator('#editScenarioModal').is_visible(),'T27 保存すると、公開情報とHOの編集内容がシナリオに保存され、ウィンドウが閉じる',sc)
+        await go(pg,'postTab')
+        ok(await pg.input_value('#title')=='メモ書き' and await pg.input_value('#intro')=='作業中の本文','T27 編集・保存のあとも、作業中だった投稿内容は戻っている')
+        # 破棄の確認
+        await go(pg,'databaseTab'); await pg.locator('#dbCardContainer > *',has_text='HO付きの卓・改').first.locator('[data-act="edit"]').click(); await pg.wait_for_timeout(500)
+        await pg.fill('#title','破棄されるはず'); await pg.locator('[data-sw="close"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('#editScenarioModal').is_visible() and await pg.locator('button:visible',has_text='破棄して閉じる').count()==1,'T27 編集内容があるまま閉じようとすると、破棄の確認が出る')
+        await click_btn(pg,'破棄して閉じる'); await pg.wait_for_timeout(400)
+        ok(not await pg.locator('#editScenarioModal').is_visible() and await pg.evaluate("appState.scenarios.some(s=>s.title==='HO付きの卓・改')") and not await pg.evaluate("appState.scenarios.some(s=>s.title==='破棄されるはず')"),'T27 破棄すると、シナリオは変わらない')
+        # 表モードでも行をクリックして開ける
+        await pg.locator('[data-on-click="setDBViewMode-table"]').click(); await pg.wait_for_timeout(300)
+        await pg.locator('#dbTableBody tr[data-sid]',has_text='HO付きの卓・改').locator('td.db-title').click(position={'x':20,'y':5}); await pg.wait_for_timeout(500)
+        ok(await pg.evaluate("document.getElementById('postTab').classList.contains('active')") and await pg.input_value('#title')=='HO付きの卓・改','T27 表示が「テーブル」でも、行をクリックするとそのシナリオが選ばれて編集画面が開く')
+        ok(not pg.errs,'T27 エラーなし',pg.errs[:2]); await pg.context.close()
+        # T28 JSONの読み込み：統合（追加・更新）／置き換え／キャンセル
+        pg=await newpage(b,None)
+        await pg.evaluate("""()=>{appState.scenarios=[{id:'sa',title:'卓A',tags:[],postedChannels:['c1'],postedInfo:{},fullBlockData:createDefaultBlocks()},{id:'sb',title:'卓B',tags:[],postedChannels:[],postedInfo:{},fullBlockData:createDefaultBlocks()}];
+          appState.channels=[{id:'c1',name:'フォーラム1',webhookUrl:'https://discord.com/api/webhooks/1/a',tags:[]}];appState.botName='今のBot';saveState();populateScenarioDBSelect();renderDBView();}""")
+        await pg.wait_for_timeout(900); await go(pg,'settingsTab')
+        async with pg.expect_download() as dl3: await pg.locator('button[data-on-click="exportData"]').click()
+        await (await dl3.value).save_as('/tmp/e2e/merge_src.json')
+        await pg.evaluate("""()=>{const a=appState.scenarios.find(s=>s.id==='sa');a.title='卓A（今の編集）';a.fullBlockData[0].items&&0;appState.scenarios=appState.scenarios.filter(s=>s.id!=='sb');appState.scenarios.push({id:'sc',title:'卓C（今だけ）',tags:[],postedChannels:[],postedInfo:{},fullBlockData:createDefaultBlocks()});appState.botName='今のBot（変更後）';saveState();populateScenarioDBSelect();renderDBView();window.__marker=1;}""")
+        await pg.wait_for_timeout(900)
+        await pg.set_input_files('#importFile','/tmp/e2e/merge_src.json'); await pg.wait_for_timeout(600)
+        ok(await pg.locator('button:visible',has_text='統合（追加・更新）').count()==1 and await pg.locator('button:visible',has_text='置き換える').count()==1 and await pg.locator('button:visible',has_text='キャンセル').count()==1,'T28 読み込むと、「統合（追加・更新）」「置き換える」「キャンセル」の3択が出る')
+        msg=await pg.inner_text('.app-dialog-msg'); ok('追加 1件' in msg and '今のデータのほうが新しいため更新しない 1件' in msg,'T28 統合した場合の件数（追加・更新しない）が事前に分かる',msg[:300])
+        await pg.locator('.app-dialog-btn',has_text='キャンセル').click(); await pg.wait_for_timeout(300)
+        ok(await pg.evaluate("appState.scenarios.map(s=>s.id).join()")=='sa,sc' and await pg.evaluate('window.__marker')==1,'T28 キャンセルすると何も変わらない')
+        await pg.set_input_files('#importFile','/tmp/e2e/merge_src.json'); await pg.wait_for_timeout(600)
+        await pg.locator('.app-dialog-btn',has_text='統合（追加・更新）').click(); await pg.wait_for_timeout(1500)
+        titles=await pg.evaluate("appState.scenarios.map(s=>s.title).join('|')")
+        ok('卓B' in titles and '卓C（今だけ）' in titles and '卓A（今の編集）' in titles,'T28 統合：ファイルにだけあるシナリオは追加され、今だけのシナリオと新しい編集は残る',titles)
+        ok(await pg.evaluate('window.__marker')==1 and await pg.evaluate('appState.botName')=='今のBot（変更後）','T28 統合は再読み込みなしで反映され、設定（Bot名）は今のまま')
+        ok('卓B' in await pg.evaluate("document.getElementById('dbScenarioSelect').innerText") and not pg.errs,'T28 一覧・プルダウンにも反映される',pg.errs[:2])
+        await pg.set_input_files('#importFile','/tmp/e2e/merge_src.json'); await pg.wait_for_timeout(600)
+        await pg.locator('.app-dialog-btn',has_text='置き換える').click(); await pg.wait_for_timeout(3000)
+        ok(await pg.evaluate('window.__marker')is None and await pg.evaluate("appState.scenarios.map(s=>s.id).sort().join()")=='sa,sb' and await pg.evaluate('appState.botName')=='今のBot','T28 「置き換える」は、従来どおりファイルの内容に置き換わる（再読み込みあり）')
+        await pg.context.close()
+        # T29 ホーム（カード一覧）・サイドバーの検索と絞り込みタグ・投稿履歴モーダル
+        pg=await newpage(b,None,home=True)
+        ok(await pg.evaluate("document.getElementById('databaseTab').classList.contains('active')") and 'ホーム' in await pg.inner_text('#pageName'),'T29 起動すると、ホーム（シナリオ一覧）が表示される')
+        await pg.evaluate("""()=>{appState.channels=[{id:'c1',name:'フォーラムA',webhookUrl:'https://discord.com/api/webhooks/1/a',tags:[]}];
+          appState.scenarios=[1,2,3,4].map(i=>({id:'s'+i,title:'卓'+i,system:'CoC',playerCount:'3',tags:i%2?['探索','屋内']:['戦闘'],postedChannels:i==1?['c1']:[],postedInfo:i==1?{c1:{name:'フォーラムA',date:'2026-01-02T03:04:05.000Z',tags:['探索']}}:{},fullBlockData:createDefaultBlocks(),imageUrl:''}));
+          appState.history=[{date:'2026-01-02T03:04:05.000Z',title:'卓1',channels:'フォーラムA',channelIds:['c1'],tags:'探索',threads:{},threadLinks:{}}];saveState();renderDBView();populateScenarioDBSelect();}""")
+        await pg.wait_for_timeout(500)
+        ok(await pg.locator('#dbCardContainer .scenario-db-card').count()==4,'T29 ホームにシナリオがカード一覧（グリッド）で出る')
+        ok(await pg.locator('#sbTags .sb-tag').count()==3 and '探索' in await pg.inner_text('#sbTags'),'T29 サイドバー下部に、絞り込みタグが出る（探索・屋内・戦闘）')
+        await pg.locator('#sbTags .sb-tag',has_text='戦闘').click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('#dbCardContainer .scenario-db-card').count()==2 and await pg.locator('#sbTags .sb-tag.on').count()==1,'T29 タグで絞り込める（選んだタグが色つきになる）')
+        await pg.locator('#sbTags .sb-tag.clear').click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('#dbCardContainer .scenario-db-card').count()==4,'T29 絞り込みを解除すると、すべて戻る')
+        await go(pg,'settingsTab'); await pg.fill('#sbSearch','卓3'); await pg.wait_for_timeout(500)
+        ok(await pg.evaluate("document.getElementById('databaseTab').classList.contains('active')") and await pg.locator('#dbCardContainer .scenario-db-card').count()==1,'T29 サイドバーの検索バーに入力すると、ホームへ移って絞り込まれる')
+        await pg.fill('#sbSearch',''); await pg.wait_for_timeout(300)
+        await pg.locator('#dbCardContainer > *',has_text='卓1').first.locator('.scenario-card-title').click(position={'x':20,'y':5}); await pg.wait_for_timeout(600)
+        ok(await pg.evaluate("document.getElementById('postTab').classList.contains('active')") and await pg.input_value('#title')=='卓1' and '卓1' in await pg.inner_text('#editScenarioName'),'T29 カードをクリックすると、そのシナリオが選ばれて「Discord投稿・編集」画面へ移る')
+        await pg.locator('[data-on-click="open-history-modal"]').click(); await pg.wait_for_timeout(300)
+        ok(await pg.locator('.hist-modal').is_visible() and 'フォーラムA' in await pg.inner_text('.hist-modal') and '2026' in await pg.inner_text('.hist-modal'),'T29 [📜 投稿履歴を見る]で、投稿済みチャンネル（postedChannels）と投稿の記録がモーダルに出る')
+        await pg.locator('.hist-modal [data-hclose]').click(); await pg.wait_for_timeout(200)
+        ok(await pg.locator('.hist-modal').count()==0,'T29 モーダルを閉じられる')
+        await go(pg,'databaseTab'); await pg.locator('#dbCardContainer > *',has_text='卓2').first.locator('.scenario-card-title').click(position={'x':20,'y':5}); await pg.wait_for_timeout(400)
+        await pg.locator('[data-on-click="open-history-modal"]').click(); await pg.keyboard.press('Escape'); await pg.wait_for_timeout(200)
+        ok(await pg.locator('.hist-modal').count()==0,'T29 Escでも閉じられる')
+        # 作業中の未保存の内容がある状態で別のシナリオを選ぶと、確認が出る
+        await pg.evaluate("resetForm=resetForm;currentScenarioId=null;document.getElementById('title').value='書きかけの投稿'")
+        await go(pg,'databaseTab'); await pg.locator('#dbCardContainer > *',has_text='卓3').first.locator('.scenario-card-title').click(position={'x':20,'y':5}); await pg.wait_for_timeout(300)
+        ok(await pg.locator('button:visible',has_text='置き換えて開く').count()==1 and await pg.input_value('#title')=='書きかけの投稿','T29 未保存の作業中の内容があるときは、置き換える前に確認が出る')
+        await click_btn(pg,'置き換えて開く'); await pg.wait_for_timeout(500)
+        ok(await pg.input_value('#title')=='卓3','T29 確認して進むと、そのシナリオが開く')
+        ok(not pg.errs,'T29 エラーなし',pg.errs[:2]); await pg.context.close()
+        pg=await newpage(b,None,home=True,w=390); ov=await pg.evaluate("[document.documentElement.scrollWidth,innerWidth]")
+        pos=await pg.evaluate("(()=>{const b=[...document.querySelectorAll('.nav-tabs .tab-btn')].map(x=>Math.round(x.getBoundingClientRect().top));return b.every(t=>t===b[0])})()")
+        ok(ov[0]==ov[1] and pos,'T29 幅390pxでは、サイドバーが上の帯になり（メニューは横並び）、横にはみ出さない',ov); await pg.context.close()
+        # T30 ギャラリー（シナリオ専用のみ。共通ギャラリーは廃止）・フォルダ／ZIPのドラッグ＆ドロップ・画像選択モーダル（Webブラウザだけで動く）
+        import zipfile,io
+        def mkzip():
+            bio=io.BytesIO()
+            with zipfile.ZipFile(bio,'w') as z:
+                z.writestr(zipfile.ZipInfo('maps/a.png'),bytes(PNG_BYTES),compress_type=zipfile.ZIP_DEFLATED)
+                z.writestr(zipfile.ZipInfo('maps/b.png'),bytes(PNG_BYTES),compress_type=zipfile.ZIP_STORED)
+                z.writestr(zipfile.ZipInfo('キャラ.png'),bytes(PNG_BYTES),compress_type=zipfile.ZIP_DEFLATED)
+                z.writestr('readme.txt','x'); z.writestr('__MACOSX/maps/._a.png','x')
+            return list(bio.getvalue())
+        PNG=PNG_BYTES; B64=base64.b64encode(bytes(PNG)).decode()
+        pg=await newpage(b,None,home=True)
+        ok(await pg.evaluate("typeof IS_ELECTRON")=='undefined' and await pg.locator('#scenarioDocs').count()==0,'T30 Web版には、デスクトップ専用の機能（資料ファイル枠など）が無い')
+        ok(await pg.evaluate("JSON.stringify([appState.imageCategories,appState.imageAssets])")=='[["未分類","背景","パネル"],[]]','T30 appState の共通素材：imageCategories の初期値は［未分類・背景・パネル］、imageAssets は空')
+        await pg.evaluate("""()=>{appState.scenarios=[{id:'s1',title:'ギャラリー卓',tags:[],postedChannels:[],postedInfo:{},fullBlockData:createDefaultBlocks()}];saveState();renderDBView();populateScenarioDBSelect();}""")
+        # シナリオ専用ギャラリー（編集画面の下部）
+        await go(pg,'postTab')
+        ok('DBに保存' in await pg.inner_text('#scenarioGallery'),'T30 シナリオが未保存のあいだは、専用ギャラリーは「DBに保存」の案内が出る')
+        await pg.evaluate("loadScenarioFromDB('s1')"); await pg.wait_for_timeout(400)
+        ok(await pg.evaluate("JSON.stringify(activeScenario().imageCategories)")=='["トレーラー","NPC","マップ"]' and await pg.evaluate("activeScenario().images.length")==0 and await pg.locator('#scenarioGallery .gal-cat').count()==3,'T30 シナリオ専用素材：imageCategories の初期値は［トレーラー・NPC・マップ］、images は空。「📝 投稿・編集」画面の下部に専用ギャラリーが出る')
+        await pg.locator('#scenarioGallery [data-gal="add-folder"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('#scenarioGallery .gal-rename').fill('マイ素材'); await pg.keyboard.press('Enter'); await pg.wait_for_timeout(200)
+        ok(await pg.evaluate("activeScenario().imageCategories.join()")=='トレーラー,NPC,マップ,マイ素材','T30 専用ギャラリーで、[📁 新規フォルダを追加]からフォルダを追加して名前を付けられる')
+        await pg.locator('#scenarioGallery [data-gal="rename"][data-gcat="マイ素材"]').click(); await pg.locator('#scenarioGallery .gal-rename').fill('背景2'); await pg.keyboard.press('Enter'); await pg.wait_for_timeout(200)
+        ok('背景2' in await pg.evaluate("activeScenario().imageCategories") and 'マイ素材' not in await pg.evaluate("activeScenario().imageCategories"),'T30 フォルダ名を変更できる')
+        await pg.locator('#scenarioGallery [data-gal="del-cat"][data-gcat="背景2"]').click(); await pg.wait_for_timeout(200); await click_btn(pg,'削除'); await pg.wait_for_timeout(300)
+        ok('背景2' not in await pg.evaluate("activeScenario().imageCategories"),'T30 フォルダを削除できる（確認つき）')
+        ok(await pg.locator('#galleryTab').count()==0 and await pg.locator('[data-tab="galleryTab"]').count()==0,'T30 共通ギャラリー（タブ・画面）は存在しない')
+        await drop_entries(pg,'#scenarioGallery [data-gdrop="scenario"]',[{'dir':'地図','files':[{'name':'m1.png','bytes':PNG,'type':'image/png'},{'name':'m2.png','bytes':PNG,'type':'image/png'}]}]); await pg.wait_for_timeout(900)
+        await drop_files(pg,'#scenarioGallery [data-gdrop="scenario"]',[{'name':'NPC集.zip','type':'application/zip','bytes':mkzip()}]); await pg.wait_for_timeout(1200)
+        ok(await pg.evaluate("activeScenario().images.filter(a=>a.category==='地図').length")==2 and await pg.evaluate("activeScenario().images.filter(a=>a.category==='NPC集').length")==3 and '地図' in await pg.evaluate("activeScenario().imageCategories"),'T30 専用ギャラリーにも、フォルダ・ZIPをドロップして一括登録できる')
+        # 画像選択モーダル（公開情報・HO・Botアイコン）
+        await pg.evaluate("addImageBlock()"); await pg.wait_for_timeout(300)
+        await pg.locator('[data-ba="gallery"]').first.click(); await pg.wait_for_timeout(400)
+        ok(await pg.locator('.gal-picker').is_visible() and await pg.locator('.gal-picker .gal-tab').count()==1 and '専用' in await pg.inner_text('.gal-picker .gal-tab.on'),'T30 公開情報の画像ブロックの[🖼️ ギャラリーから選ぶ]で、「このシナリオ専用」の画像を選べるモーダルが出る')
+        await pg.locator('.gal-picker .gal-item').first.click(); await pg.wait_for_timeout(400)
+        pu=await pg.evaluate("blockOrder.filter(b=>b.type==='image').map(b=>b.previewUrl).filter(Boolean)")
+        ok(await pg.locator('.gal-picker').count()==0 and len(pu)==1 and pu[0].startswith('data:image'),'T30 画像を選ぶと、そのブロックに入る')
+        await pg.evaluate("addImageBlock()"); await pg.locator('[data-ba="gallery"]').last.click(); await pg.wait_for_timeout(300)
+        await pg.keyboard.press('Escape'); await pg.wait_for_timeout(200); ok(await pg.locator('.gal-picker').count()==0,'T30 Escでキャンセルできる')
+        await pg.locator('[data-ho-act="add-ho"]').click(); await pg.locator('[data-ho-act="add-image"]').click(); await pg.wait_for_timeout(200)
+        await pg.locator('[data-ho-act="gallery"]').click(); await pg.wait_for_timeout(300); await pg.locator('.gal-picker .gal-item').first.click(); await pg.wait_for_timeout(400)
+        ok(await pg.evaluate("secretHOs[0].blocks.some(b=>b.type==='image'&&b.previewUrl.startsWith('data:image'))"),'T30 HOの画像ブロックにも[🖼️ ギャラリーから選ぶ]があり、選べる')
+        await go(pg,'settingsTab'); await pg.locator('[data-on-click="pick-bot-avatar"]').click(); await pg.wait_for_timeout(300); await pg.locator('.gal-picker .gal-item').first.click(); await pg.wait_for_timeout(900)
+        ok(bool(await pg.evaluate("appState.botAvatarData")) and await pg.locator('#botAvatarPreview').is_visible(),'T30 Botアイコンにも[🖼️ ギャラリーから選ぶ]があり、選べる')
+        # デスクトップ版で登録された画像（zipview://）は、Web版では使えない旨を知らせる
+        await pg.evaluate("activeScenario().images.push({id:'dz',name:'デスクトップの画像',dataUrl:'zipview:///pc/x.zip/a.png',category:'トレーラー'});saveState()"); await go(pg,'postTab'); await pg.locator('[data-ho-act="tab"][data-hi="-1"]').click(); await pg.evaluate("addImageBlock();blockOrder.forEach(b=>b.collapsed=false);renderBlockUI()")
+        before=await pg.evaluate("blockOrder.filter(b=>b.type==='image'&&b.previewUrl).length")
+        await pg.locator('[data-ba="gallery"]').last.click(); await pg.wait_for_timeout(300); await pg.locator('.gal-picker .gal-cat',has_text='トレーラー').click(); await pg.wait_for_timeout(200)
+        await pg.locator('.gal-picker .gal-item[data-gid="dz"]').click(); await pg.wait_for_timeout(400)
+        ok('デスクトップ版' in await pg.inner_text('#toast-box') and await pg.evaluate("blockOrder.filter(b=>b.type==='image'&&b.previewUrl).length")==before,'T30 デスクトップ版で登録された画像は、Web版では使えない旨をお知らせし、ブロックは変わらない')
+        ok(await pg.locator('.gal-picker').is_visible(),'T30 使えない画像を選んでも、選択画面は閉じずに、ほかの画像を選び直せる')
+        await pg.keyboard.press('Escape'); await pg.wait_for_timeout(200)
+        # 保存・読み込み
+        await go(pg,'settingsTab'); await pg.wait_for_timeout(1200)
+        async with pg.expect_download() as dl4: await pg.locator('button[data-on-click="exportData"]').click()
+        await (await dl4.value).save_as('/tmp/e2e/gallery_backup.json'); js=json.load(open('/tmp/e2e/gallery_backup.json',encoding='utf-8'))
+        sc_=next(s for s in js['scenarios'] if s['id']=='s1')
+        ok(isinstance(js['imageAssets'],list) and len(sc_['images'])==6 and sc_['imageCategories'][:3]==['トレーラー','NPC','マップ'],'T30 ギャラリー用データは、JSONの保存対象に含まれる（シナリオ専用素材。旧バージョンの共通素材のデータも壊さず保持）',len(sc_['images']))
+        n_assets=await pg.evaluate("appState.scenarios.find(s=>s.id==='s1').images.length")
+        await pg.reload(); await pg.wait_for_timeout(2400)
+        ok(await pg.evaluate("appState.scenarios.find(s=>s.id==='s1').images.length")==n_assets and n_assets==6,'T30 再読み込みしても、ギャラリーのデータが残っている（画像は参照で保存・復元される）')
+        ok(not pg.errs,'T30 エラーなし',pg.errs[:2]); await pg.context.close()
+        await b.close()
+    print(f'\n== {sum(res)}/{len(res)} passed ==')
+asyncio.run(main())
